@@ -134,6 +134,64 @@ namespace Heathen.Lexicon
             return result;
         }
 
+        // Inject or overwrite a string entry without a LexiconData asset. Uses active culture when cultureCode is null.
+        public static void SetString(string dotPath, string value, string cultureCode = null)
+        {
+            if (string.IsNullOrWhiteSpace(dotPath)) return;
+            var key  = Hash(dotPath);
+            var dict = EnsureCulture(ResolveWriteCulture(cultureCode));
+            dict[key] = new LexiconData.Entry { key = dotPath, hint = LexiconHintType.String, stringValue = value };
+        }
+
+        // Inject or overwrite an asset entry without a LexiconData asset. Uses active culture when cultureCode is null.
+        public static void SetAsset(string dotPath, Object asset, string cultureCode = null)
+        {
+            if (string.IsNullOrWhiteSpace(dotPath)) return;
+            var key  = Hash(dotPath);
+            var hint = asset switch
+            {
+                UnityEngine.AudioClip  _ => LexiconHintType.Sound,
+                UnityEngine.Texture    _ => LexiconHintType.Texture,
+                UnityEngine.Sprite     _ => LexiconHintType.Sprite,
+                UnityEngine.GameObject _ => LexiconHintType.Prefab,
+                _                        => LexiconHintType.Asset,
+            };
+            var dict = EnsureCulture(ResolveWriteCulture(cultureCode));
+            dict[key] = new LexiconData.Entry { key = dotPath, hint = hint, assetValue = asset };
+        }
+
+        // Remove a runtime-injected entry. Pass null to remove from all cultures.
+        public static void RemoveKey(string dotPath, string cultureCode = null)
+        {
+            if (string.IsNullOrWhiteSpace(dotPath)) return;
+            var key = Hash(dotPath);
+            if (cultureCode != null)
+            {
+                if (_cultures.TryGetValue(cultureCode, out var dict))
+                    dict.Remove(key);
+            }
+            else
+            {
+                foreach (var dict in _cultures.Values)
+                    dict.Remove(key);
+            }
+        }
+
+        private static string ResolveWriteCulture(string cultureCode) =>
+            cultureCode ?? _activeCulture ?? _defaultCulture ?? "default";
+
+        private static Dictionary<ulong, LexiconData.Entry> EnsureCulture(string culture)
+        {
+            if (!_cultures.TryGetValue(culture, out var dict))
+            {
+                dict = new Dictionary<ulong, LexiconData.Entry>();
+                _cultures[culture] = dict;
+                if (_defaultCulture == null) _defaultCulture = culture;
+                if (_activeCulture  == null) _activeCulture  = culture;
+            }
+            return dict;
+        }
+
         private static bool TryGetEntry(ulong key, out LexiconData.Entry entry)
         {
             if (_activeCulture != null && _cultures.TryGetValue(_activeCulture, out var active))
