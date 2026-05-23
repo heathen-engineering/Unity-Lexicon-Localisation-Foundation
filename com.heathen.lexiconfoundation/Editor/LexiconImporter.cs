@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Text;
+using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEditor.AssetImporters;
 using UnityEngine;
@@ -39,7 +39,13 @@ namespace Heathen.Lexicon.Editor
 
             try
             {
-                ParseHelex(json, ctx, compiled);
+                var root = JObject.Parse(json);
+                compiled.AssetId      = root["assetId"]?.Value<string>() ?? "";
+                compiled.AutoRegister = root["registered"]?.Value<bool>() ?? true;
+                compiled.Cultures     = root["cultures"]?.ToObject<string[]>() ?? Array.Empty<string>();
+                compiled.Entries      = root["entries"] is JObject entries
+                    ? ParseEntries(entries, ctx)
+                    : Array.Empty<CompiledLexiconEntry>();
             }
             catch (Exception e)
             {
@@ -58,94 +64,27 @@ namespace Heathen.Lexicon.Editor
                 LexiconRegistry.Register(compiled);
         }
 
-        private static void ParseHelex(string json, AssetImportContext ctx, LexiconCompiledData compiled)
-        {
-            compiled.AutoRegister = true; // .helex default
-            compiled.Cultures     = Array.Empty<string>();
-            compiled.Entries      = Array.Empty<CompiledLexiconEntry>();
-
-            int i = 0;
-            JsonScanner.SkipWs(json, ref i);
-            if (i >= json.Length || json[i] != '{') return;
-            i++; // skip root '{'
-
-            while (i < json.Length)
-            {
-                JsonScanner.SkipWs(json, ref i);
-                if (i >= json.Length || json[i] == '}') break;
-                if (json[i] == ',') { i++; continue; }
-                if (json[i] != '"') { i++; continue; }
-
-                var key = JsonScanner.ReadString(json, ref i);
-                JsonScanner.SkipWs(json, ref i);
-                if (i >= json.Length || json[i] != ':') continue;
-                i++; // skip ':'
-                JsonScanner.SkipWs(json, ref i);
-
-                switch (key)
-                {
-                    case "assetId":
-                        compiled.AssetId = JsonScanner.ReadString(json, ref i) ?? "";
-                        break;
-
-                    case "registered":
-                        compiled.AutoRegister = JsonScanner.ReadBool(json, ref i, true);
-                        break;
-
-                    case "cultures":
-                        compiled.Cultures = JsonScanner.ReadStringArray(json, ref i);
-                        break;
-
-                    case "entries":
-                        compiled.Entries = ParseEntries(json, ref i, ctx);
-                        break;
-
-                    default:
-                        JsonScanner.SkipValue(json, ref i);
-                        break;
-                }
-            }
-        }
-
-        private static CompiledLexiconEntry[] ParseEntries(string json, ref int i, AssetImportContext ctx)
+        private static CompiledLexiconEntry[] ParseEntries(JObject entries, AssetImportContext ctx)
         {
             var result = new List<CompiledLexiconEntry>();
-
-            JsonScanner.SkipWs(json, ref i);
-            if (i >= json.Length || json[i] != '{') return result.ToArray();
-            i++; // skip '{'
-
-            while (i < json.Length)
+            foreach (var prop in entries.Properties())
             {
-                JsonScanner.SkipWs(json, ref i);
-                if (i >= json.Length || json[i] == '}') { i++; break; }
-                if (json[i] == ',') { i++; continue; }
-                if (json[i] != '"') { i++; continue; }
-
-                var key = JsonScanner.ReadString(json, ref i);
+                var key = prop.Name.Trim();
                 if (string.IsNullOrWhiteSpace(key)) continue;
-                key = key.Trim();
 
-                JsonScanner.SkipWs(json, ref i);
-                if (i >= json.Length || json[i] != ':') continue;
-                i++; // skip ':'
-                JsonScanner.SkipWs(json, ref i);
-                if (i >= json.Length) break;
-
-                if (json[i] == '"')
+                if (prop.Value.Type == JTokenType.String)
                 {
-                    var value = JsonScanner.ReadString(json, ref i);
                     result.Add(new CompiledLexiconEntry
                     {
                         Hash        = LexiconRegistry.Hash(key),
                         Key         = key,
                         Hint        = LexiconHintType.String,
-                        StringValue = value ?? "",
+                        StringValue = prop.Value.Value<string>() ?? "",
                     });
                 }
-                else if (json[i] == '{')
+                else if (prop.Value is JObject assetObj)
                 {
-                    var path = JsonScanner.ExtractStringProp(json, ref i, "path");
+                    var path = assetObj["path"]?.Value<string>();
                     if (path == null)
                     {
                         ctx.LogImportWarning($"Asset entry '{key}' has no 'path' field — skipped.");
@@ -169,10 +108,8 @@ namespace Heathen.Lexicon.Editor
                 else
                 {
                     ctx.LogImportWarning($"Entry '{key}' has unrecognised value type — skipped.");
-                    JsonScanner.SkipValue(json, ref i);
                 }
             }
-
             return result.ToArray();
         }
 
@@ -184,141 +121,6 @@ namespace Heathen.Lexicon.Editor
             GameObject _ => LexiconHintType.Prefab,
             _            => LexiconHintType.Asset,
         };
-    }
-
-    // Minimal JSON scanner for .NET Standard 2.0. Handles the subset of JSON used in .helex files.
-    internal static class JsonScanner
-    {
-        public static void SkipWs(string s, ref int i)
-        {
-            while (i < s.Length && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n'))
-                i++;
-        }
-
-        // Read a JSON string. i must point at opening '"'. Advances i past closing '"'.
-        public static string ReadString(string s, ref int i)
-        {
-            if (i >= s.Length || s[i] != '"') return null;
-            i++; // skip opening '"'
-            var sb = new StringBuilder();
-            while (i < s.Length && s[i] != '"')
-            {
-                if (s[i] == '\\')
-                {
-                    i++;
-                    if (i < s.Length) { sb.Append(Unescape(s[i])); i++; }
-                }
-                else
-                {
-                    sb.Append(s[i]); i++;
-                }
-            }
-            if (i < s.Length) i++; // skip closing '"'
-            return sb.ToString();
-        }
-
-        // Read a JSON boolean literal. Returns defaultValue if not a bool literal.
-        public static bool ReadBool(string s, ref int i, bool defaultValue)
-        {
-            SkipWs(s, ref i);
-            if (i + 4 <= s.Length && s.Substring(i, 4) == "true")  { i += 4; return true;  }
-            if (i + 5 <= s.Length && s.Substring(i, 5) == "false") { i += 5; return false; }
-            SkipValue(s, ref i);
-            return defaultValue;
-        }
-
-        // Read a JSON string array. i must point at '['.
-        public static string[] ReadStringArray(string s, ref int i)
-        {
-            SkipWs(s, ref i);
-            if (i >= s.Length || s[i] != '[') return Array.Empty<string>();
-            i++; // skip '['
-            var list = new List<string>();
-            while (i < s.Length)
-            {
-                SkipWs(s, ref i);
-                if (i >= s.Length || s[i] == ']') { if (i < s.Length) i++; break; }
-                if (s[i] == ',') { i++; continue; }
-                if (s[i] == '"') { var v = ReadString(s, ref i); if (v != null) list.Add(v); }
-                else SkipValue(s, ref i);
-            }
-            return list.ToArray();
-        }
-
-        // Find a string-valued property named propName inside the object at i (which must point at '{').
-        // Advances i past the closing '}'. Returns null if not found.
-        public static string ExtractStringProp(string s, ref int i, string propName)
-        {
-            if (i >= s.Length || s[i] != '{') return null;
-            i++; // skip '{'
-            string found = null;
-            while (i < s.Length)
-            {
-                SkipWs(s, ref i);
-                if (i >= s.Length || s[i] == '}') { i++; break; }
-                if (s[i] == ',') { i++; continue; }
-                if (s[i] != '"') { i++; continue; }
-
-                var key = ReadString(s, ref i);
-                SkipWs(s, ref i);
-                if (i >= s.Length || s[i] != ':') continue;
-                i++;
-                SkipWs(s, ref i);
-
-                if (key == propName && i < s.Length && s[i] == '"')
-                    found = ReadString(s, ref i);
-                else
-                    SkipValue(s, ref i);
-            }
-            return found;
-        }
-
-        // Skip any JSON value at position i. Advances i past the value.
-        public static void SkipValue(string s, ref int i)
-        {
-            SkipWs(s, ref i);
-            if (i >= s.Length) return;
-            switch (s[i])
-            {
-                case '"':  ReadString(s, ref i); return;
-                case '{':  SkipBlock(s, ref i, '{', '}'); return;
-                case '[':  SkipBlock(s, ref i, '[', ']'); return;
-                default:
-                    while (i < s.Length && s[i] != ',' && s[i] != '}' && s[i] != ']'
-                           && s[i] != ' ' && s[i] != '\t' && s[i] != '\r' && s[i] != '\n')
-                        i++;
-                    return;
-            }
-        }
-
-        private static void SkipBlock(string s, ref int i, char open, char close)
-        {
-            if (i >= s.Length || s[i] != open) return;
-            i++; int depth = 1;
-            while (i < s.Length && depth > 0)
-            {
-                if (s[i] == '"') { int j = i; ReadString(s, ref j); i = j; continue; }
-                if (s[i] == open)  depth++;
-                if (s[i] == close) { depth--; if (depth == 0) { i++; return; } }
-                i++;
-            }
-        }
-
-        private static char Unescape(char c)
-        {
-            switch (c)
-            {
-                case '"':  return '"';
-                case '\\': return '\\';
-                case '/':  return '/';
-                case 'n':  return '\n';
-                case 'r':  return '\r';
-                case 't':  return '\t';
-                case 'b':  return '\b';
-                case 'f':  return '\f';
-                default:   return c;
-            }
-        }
     }
 
     [InitializeOnLoad]
