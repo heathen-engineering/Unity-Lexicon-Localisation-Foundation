@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Text.Json;
+using System.Text;
 using UnityEditor;
 using UnityEditor.AssetImporters;
 using UnityEngine;
@@ -32,52 +32,14 @@ namespace Heathen.Lexicon.Editor
         public override void OnImportAsset(AssetImportContext ctx)
         {
             string json;
-            try
-            {
-                json = File.ReadAllText(ctx.assetPath);
-            }
-            catch (Exception e)
-            {
-                ctx.LogImportError($"Failed to read .helex: {e.Message}");
-                return;
-            }
+            try { json = File.ReadAllText(ctx.assetPath); }
+            catch (Exception e) { ctx.LogImportError($"Failed to read .helex: {e.Message}"); return; }
 
-            var compiled = CreateInstance<LexiconCompiledData>();
+            var compiled = ScriptableObject.CreateInstance<LexiconCompiledData>();
 
             try
             {
-                using var doc  = JsonDocument.Parse(json);
-                var       root = doc.RootElement;
-
-                compiled.AssetId = root.TryGetProperty("assetId", out var idEl) &&
-                                   idEl.ValueKind == JsonValueKind.String
-                    ? idEl.GetString()
-                    : Path.GetFileNameWithoutExtension(ctx.assetPath);
-
-                // "registered" defaults to true (every helex file should register)
-                compiled.AutoRegister = !root.TryGetProperty("registered", out var regEl) ||
-                                        regEl.ValueKind != JsonValueKind.False;
-
-                var cultures = new List<string>();
-                if (root.TryGetProperty("cultures", out var cultEl) &&
-                    cultEl.ValueKind == JsonValueKind.Array)
-                {
-                    foreach (var c in cultEl.EnumerateArray())
-                        if (c.ValueKind == JsonValueKind.String)
-                            cultures.Add(c.GetString());
-                }
-                compiled.Cultures = cultures.ToArray();
-
-                if (compiled.AutoRegister &&
-                    root.TryGetProperty("entries", out var entriesEl) &&
-                    entriesEl.ValueKind == JsonValueKind.Object)
-                {
-                    compiled.Entries = BuildEntries(entriesEl, ctx);
-                }
-                else
-                {
-                    compiled.Entries = Array.Empty<CompiledLexiconEntry>();
-                }
+                ParseHelex(json, ctx, compiled);
             }
             catch (Exception e)
             {
@@ -86,6 +48,9 @@ namespace Heathen.Lexicon.Editor
                 compiled.Cultures = Array.Empty<string>();
             }
 
+            if (string.IsNullOrWhiteSpace(compiled.AssetId))
+                compiled.AssetId = Path.GetFileNameWithoutExtension(ctx.assetPath);
+
             ctx.AddObjectToAsset("main", compiled);
             ctx.SetMainObject(compiled);
 
@@ -93,48 +58,109 @@ namespace Heathen.Lexicon.Editor
                 LexiconRegistry.Register(compiled);
         }
 
-        private static CompiledLexiconEntry[] BuildEntries(JsonElement entriesEl, AssetImportContext ctx)
+        private static void ParseHelex(string json, AssetImportContext ctx, LexiconCompiledData compiled)
+        {
+            compiled.AutoRegister = true; // .helex default
+            compiled.Cultures     = Array.Empty<string>();
+            compiled.Entries      = Array.Empty<CompiledLexiconEntry>();
+
+            int i = 0;
+            JsonScanner.SkipWs(json, ref i);
+            if (i >= json.Length || json[i] != '{') return;
+            i++; // skip root '{'
+
+            while (i < json.Length)
+            {
+                JsonScanner.SkipWs(json, ref i);
+                if (i >= json.Length || json[i] == '}') break;
+                if (json[i] == ',') { i++; continue; }
+                if (json[i] != '"') { i++; continue; }
+
+                var key = JsonScanner.ReadString(json, ref i);
+                JsonScanner.SkipWs(json, ref i);
+                if (i >= json.Length || json[i] != ':') continue;
+                i++; // skip ':'
+                JsonScanner.SkipWs(json, ref i);
+
+                switch (key)
+                {
+                    case "assetId":
+                        compiled.AssetId = JsonScanner.ReadString(json, ref i) ?? "";
+                        break;
+
+                    case "registered":
+                        compiled.AutoRegister = JsonScanner.ReadBool(json, ref i, true);
+                        break;
+
+                    case "cultures":
+                        compiled.Cultures = JsonScanner.ReadStringArray(json, ref i);
+                        break;
+
+                    case "entries":
+                        compiled.Entries = ParseEntries(json, ref i, ctx);
+                        break;
+
+                    default:
+                        JsonScanner.SkipValue(json, ref i);
+                        break;
+                }
+            }
+        }
+
+        private static CompiledLexiconEntry[] ParseEntries(string json, ref int i, AssetImportContext ctx)
         {
             var result = new List<CompiledLexiconEntry>();
 
-            foreach (var prop in entriesEl.EnumerateObject())
-            {
-                if (string.IsNullOrWhiteSpace(prop.Name)) continue;
-                var key  = prop.Name.Trim();
-                var hash = LexiconRegistry.Hash(key);
+            JsonScanner.SkipWs(json, ref i);
+            if (i >= json.Length || json[i] != '{') return result.ToArray();
+            i++; // skip '{'
 
-                if (prop.Value.ValueKind == JsonValueKind.String)
+            while (i < json.Length)
+            {
+                JsonScanner.SkipWs(json, ref i);
+                if (i >= json.Length || json[i] == '}') { i++; break; }
+                if (json[i] == ',') { i++; continue; }
+                if (json[i] != '"') { i++; continue; }
+
+                var key = JsonScanner.ReadString(json, ref i);
+                if (string.IsNullOrWhiteSpace(key)) continue;
+                key = key.Trim();
+
+                JsonScanner.SkipWs(json, ref i);
+                if (i >= json.Length || json[i] != ':') continue;
+                i++; // skip ':'
+                JsonScanner.SkipWs(json, ref i);
+                if (i >= json.Length) break;
+
+                if (json[i] == '"')
                 {
+                    var value = JsonScanner.ReadString(json, ref i);
                     result.Add(new CompiledLexiconEntry
                     {
-                        Hash        = hash,
+                        Hash        = LexiconRegistry.Hash(key),
                         Key         = key,
                         Hint        = LexiconHintType.String,
-                        StringValue = prop.Value.GetString() ?? "",
+                        StringValue = value ?? "",
                     });
                 }
-                else if (prop.Value.ValueKind == JsonValueKind.Object)
+                else if (json[i] == '{')
                 {
-                    // Asset entry — "path" is Unity project-relative path; "uuid" is O3DE-only.
-                    if (!prop.Value.TryGetProperty("path", out var pathEl) ||
-                        pathEl.ValueKind != JsonValueKind.String)
+                    var path = JsonScanner.ExtractStringProp(json, ref i, "path");
+                    if (path == null)
                     {
                         ctx.LogImportWarning($"Asset entry '{key}' has no 'path' field — skipped.");
                         continue;
                     }
-
-                    var assetPath = pathEl.GetString();
-                    var asset     = AssetDatabase.LoadAssetAtPath<Object>(assetPath);
+                    var asset = AssetDatabase.LoadAssetAtPath<Object>(path);
                     if (asset == null)
                     {
-                        ctx.LogImportWarning($"Asset not found at '{assetPath}' for key '{key}' — skipped.");
+                        ctx.LogImportWarning($"Asset not found at '{path}' for key '{key}' — skipped.");
                         continue;
                     }
-
-                    ctx.DependsOnSourceAsset(assetPath);
+                    ctx.DependsOnSourceAsset(path);
                     result.Add(new CompiledLexiconEntry
                     {
-                        Hash       = hash,
+                        Hash       = LexiconRegistry.Hash(key),
                         Key        = key,
                         Hint       = HintFromAsset(asset),
                         AssetValue = asset,
@@ -143,6 +169,7 @@ namespace Heathen.Lexicon.Editor
                 else
                 {
                     ctx.LogImportWarning($"Entry '{key}' has unrecognised value type — skipped.");
+                    JsonScanner.SkipValue(json, ref i);
                 }
             }
 
@@ -159,15 +186,145 @@ namespace Heathen.Lexicon.Editor
         };
     }
 
-    // Refreshes the editor-time registry from all compiled .helex assets on load
-    // and after any asset import. Mirrors LexiconDataEditor's [InitializeOnLoad] pattern.
+    // Minimal JSON scanner for .NET Standard 2.0. Handles the subset of JSON used in .helex files.
+    internal static class JsonScanner
+    {
+        public static void SkipWs(string s, ref int i)
+        {
+            while (i < s.Length && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n'))
+                i++;
+        }
+
+        // Read a JSON string. i must point at opening '"'. Advances i past closing '"'.
+        public static string ReadString(string s, ref int i)
+        {
+            if (i >= s.Length || s[i] != '"') return null;
+            i++; // skip opening '"'
+            var sb = new StringBuilder();
+            while (i < s.Length && s[i] != '"')
+            {
+                if (s[i] == '\\')
+                {
+                    i++;
+                    if (i < s.Length) { sb.Append(Unescape(s[i])); i++; }
+                }
+                else
+                {
+                    sb.Append(s[i]); i++;
+                }
+            }
+            if (i < s.Length) i++; // skip closing '"'
+            return sb.ToString();
+        }
+
+        // Read a JSON boolean literal. Returns defaultValue if not a bool literal.
+        public static bool ReadBool(string s, ref int i, bool defaultValue)
+        {
+            SkipWs(s, ref i);
+            if (i + 4 <= s.Length && s.Substring(i, 4) == "true")  { i += 4; return true;  }
+            if (i + 5 <= s.Length && s.Substring(i, 5) == "false") { i += 5; return false; }
+            SkipValue(s, ref i);
+            return defaultValue;
+        }
+
+        // Read a JSON string array. i must point at '['.
+        public static string[] ReadStringArray(string s, ref int i)
+        {
+            SkipWs(s, ref i);
+            if (i >= s.Length || s[i] != '[') return Array.Empty<string>();
+            i++; // skip '['
+            var list = new List<string>();
+            while (i < s.Length)
+            {
+                SkipWs(s, ref i);
+                if (i >= s.Length || s[i] == ']') { if (i < s.Length) i++; break; }
+                if (s[i] == ',') { i++; continue; }
+                if (s[i] == '"') { var v = ReadString(s, ref i); if (v != null) list.Add(v); }
+                else SkipValue(s, ref i);
+            }
+            return list.ToArray();
+        }
+
+        // Find a string-valued property named propName inside the object at i (which must point at '{').
+        // Advances i past the closing '}'. Returns null if not found.
+        public static string ExtractStringProp(string s, ref int i, string propName)
+        {
+            if (i >= s.Length || s[i] != '{') return null;
+            i++; // skip '{'
+            string found = null;
+            while (i < s.Length)
+            {
+                SkipWs(s, ref i);
+                if (i >= s.Length || s[i] == '}') { i++; break; }
+                if (s[i] == ',') { i++; continue; }
+                if (s[i] != '"') { i++; continue; }
+
+                var key = ReadString(s, ref i);
+                SkipWs(s, ref i);
+                if (i >= s.Length || s[i] != ':') continue;
+                i++;
+                SkipWs(s, ref i);
+
+                if (key == propName && i < s.Length && s[i] == '"')
+                    found = ReadString(s, ref i);
+                else
+                    SkipValue(s, ref i);
+            }
+            return found;
+        }
+
+        // Skip any JSON value at position i. Advances i past the value.
+        public static void SkipValue(string s, ref int i)
+        {
+            SkipWs(s, ref i);
+            if (i >= s.Length) return;
+            switch (s[i])
+            {
+                case '"':  ReadString(s, ref i); return;
+                case '{':  SkipBlock(s, ref i, '{', '}'); return;
+                case '[':  SkipBlock(s, ref i, '[', ']'); return;
+                default:
+                    while (i < s.Length && s[i] != ',' && s[i] != '}' && s[i] != ']'
+                           && s[i] != ' ' && s[i] != '\t' && s[i] != '\r' && s[i] != '\n')
+                        i++;
+                    return;
+            }
+        }
+
+        private static void SkipBlock(string s, ref int i, char open, char close)
+        {
+            if (i >= s.Length || s[i] != open) return;
+            i++; int depth = 1;
+            while (i < s.Length && depth > 0)
+            {
+                if (s[i] == '"') { int j = i; ReadString(s, ref j); i = j; continue; }
+                if (s[i] == open)  depth++;
+                if (s[i] == close) { depth--; if (depth == 0) { i++; return; } }
+                i++;
+            }
+        }
+
+        private static char Unescape(char c)
+        {
+            switch (c)
+            {
+                case '"':  return '"';
+                case '\\': return '\\';
+                case '/':  return '/';
+                case 'n':  return '\n';
+                case 'r':  return '\r';
+                case 't':  return '\t';
+                case 'b':  return '\b';
+                case 'f':  return '\f';
+                default:   return c;
+            }
+        }
+    }
+
     [InitializeOnLoad]
     internal static class LexiconCompiledDataRefresh
     {
-        static LexiconCompiledDataRefresh()
-        {
-            EditorApplication.delayCall += Refresh;
-        }
+        static LexiconCompiledDataRefresh() => EditorApplication.delayCall += Refresh;
 
         internal static void Refresh()
         {
@@ -179,7 +336,6 @@ namespace Heathen.Lexicon.Editor
                     AssetDatabase.GUIDToAssetPath(guid));
                 if (asset != null && asset.AutoRegister) assets.Add(asset);
             }
-            // Register "default" assets first so they become the unconditional fallback
             foreach (var a in assets) if ( LexiconRegistry.IsDefaultCompiledAsset(a)) LexiconRegistry.Register(a);
             foreach (var a in assets) if (!LexiconRegistry.IsDefaultCompiledAsset(a)) LexiconRegistry.Register(a);
         }
@@ -212,14 +368,12 @@ namespace Heathen.Lexicon.Editor
             else
             {
                 EditorGUI.BeginDisabledGroup(true);
-                foreach (var c in data.Cultures)
-                    EditorGUILayout.LabelField(c, EditorStyles.miniLabel);
+                foreach (var c in data.Cultures) EditorGUILayout.LabelField(c, EditorStyles.miniLabel);
                 EditorGUI.EndDisabledGroup();
             }
 
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Compiled Entries", EditorStyles.boldLabel);
-
             if (data.Entries == null || data.Entries.Length == 0)
             {
                 EditorGUILayout.HelpBox(
@@ -227,7 +381,6 @@ namespace Heathen.Lexicon.Editor
                     MessageType.Info);
                 return;
             }
-
             EditorGUILayout.LabelField($"{data.Entries.Length} entries", EditorStyles.miniLabel);
             EditorGUI.BeginDisabledGroup(true);
             foreach (var entry in data.Entries)
