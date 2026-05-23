@@ -29,6 +29,9 @@ namespace Heathen.Lexicon.Editor
             // Register "Default" first so it becomes the unconditional fallback
             foreach (var a in assets) if (LexiconRegistry.IsDefaultAsset(a))  LexiconRegistry.Register(a);
             foreach (var a in assets) if (!LexiconRegistry.IsDefaultAsset(a)) LexiconRegistry.Register(a);
+
+            // Also refresh compiled .helex assets.
+            LexiconCompiledDataRefresh.Refresh();
         }
 
         private SerializedProperty _assetId;

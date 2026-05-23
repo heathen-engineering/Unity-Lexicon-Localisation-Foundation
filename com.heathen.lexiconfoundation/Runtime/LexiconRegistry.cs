@@ -8,12 +8,13 @@ namespace Heathen.Lexicon
 {
     public static class LexiconRegistry
     {
-        private static readonly List<LexiconData> _registeredData = new();
+        private static readonly List<LexiconData>         _registeredData         = new();
+        private static readonly List<LexiconCompiledData> _registeredCompiledData = new();
         // culture code -> (hash -> entry)
         private static readonly Dictionary<string, Dictionary<ulong, LexiconData.Entry>> _cultures = new();
         private static string     _activeCulture;
         private static string     _defaultCulture;
-        // The asset literally named "Default" — used as the unconditional fallback
+        // The asset literally named "Default" — used as the unconditional fallback for unindexed keys
         private static LexiconData _defaultData;
 
         public static event Action<string> CultureChanged;
@@ -23,19 +24,25 @@ namespace Heathen.Lexicon
         private static void Init()
         {
             _registeredData.Clear();
+            _registeredCompiledData.Clear();
             _cultures.Clear();
             _activeCulture  = null;
             _defaultCulture = null;
             _defaultData    = null;
 
+            // Compiled .helex assets — pre-hashed at import time, zero hashing work here.
+            var compiled = Resources.LoadAll<LexiconCompiledData>("");
+            foreach (var asset in compiled)
+                if (IsDefaultCompiledAsset(asset) && asset.AutoRegister) Register(asset);
+            foreach (var asset in compiled)
+                if (!IsDefaultCompiledAsset(asset) && asset.AutoRegister) Register(asset);
+
+            // Legacy LexiconData assets — kept for backward compatibility.
             var assets = Resources.LoadAll<LexiconData>("");
-            // Register the "Default" asset first so it becomes the base fallback
             foreach (var asset in assets)
-                if (IsDefaultAsset(asset) && asset.autoRegister)
-                    Register(asset);
+                if (IsDefaultAsset(asset) && asset.autoRegister) Register(asset);
             foreach (var asset in assets)
-                if (!IsDefaultAsset(asset) && asset.autoRegister)
-                    Register(asset);
+                if (!IsDefaultAsset(asset) && asset.autoRegister) Register(asset);
         }
 
         public static void Register(LexiconData data)
@@ -52,6 +59,23 @@ namespace Heathen.Lexicon
             if (_activeCulture == null && data.cultures.Count > 0)
                 _activeCulture = data.cultures[0];
         }
+
+        public static void Register(LexiconCompiledData data)
+        {
+            if (data == null || _registeredCompiledData.Contains(data)) return;
+            _registeredCompiledData.Add(data);
+            AddCulturesFrom(data);
+
+            if (_defaultCulture == null && data.Cultures?.Length > 0)
+                _defaultCulture = data.Cultures[0];
+            if (_activeCulture == null && data.Cultures?.Length > 0)
+                _activeCulture = data.Cultures[0];
+        }
+
+        public static bool IsDefaultCompiledAsset(LexiconCompiledData data) =>
+            data != null &&
+            (string.Equals(data.name,    "Default", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(data.AssetId, "default", StringComparison.OrdinalIgnoreCase));
 
         public static bool IsDefaultAsset(LexiconData data) =>
             data != null &&
@@ -237,8 +261,34 @@ namespace Heathen.Lexicon
         private static void RebuildAllCultures()
         {
             _cultures.Clear();
+            foreach (var data in _registeredCompiledData)
+                AddCulturesFrom(data);
             foreach (var data in _registeredData)
                 AddCulturesFrom(data);
+        }
+
+        private static void AddCulturesFrom(LexiconCompiledData data)
+        {
+            if (data?.Entries == null || data.Cultures == null) return;
+            foreach (var culture in data.Cultures)
+            {
+                if (string.IsNullOrWhiteSpace(culture)) continue;
+                if (!_cultures.TryGetValue(culture, out var dict))
+                {
+                    dict = new Dictionary<ulong, LexiconData.Entry>();
+                    _cultures[culture] = dict;
+                }
+                foreach (var entry in data.Entries)
+                {
+                    dict[entry.Hash] = new LexiconData.Entry
+                    {
+                        key         = entry.Key,
+                        hint        = entry.Hint,
+                        stringValue = entry.StringValue,
+                        assetValue  = entry.AssetValue,
+                    };
+                }
+            }
         }
 
         private static FixedString512Bytes ToFixed512(string s)
