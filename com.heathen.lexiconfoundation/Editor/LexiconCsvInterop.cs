@@ -1,63 +1,60 @@
 using System.Collections.Generic;
 using System.Text;
-using UnityEditor;
 using UnityEngine;
 
 namespace Heathen.Lexicon.Editor
 {
     public static class LexiconCsvInterop
     {
-        // Single export: Col 0 = key, Col 1 = value for this asset.
-        public static string ExportSingle(LexiconData data)
+        // Single export: Col 0 = key, Col 1 = value for this document.
+        internal static string ExportSingle(HelexDocument doc)
         {
+            if (doc == null) return "";
             var sb = new StringBuilder();
-            sb.AppendLine(Encode("Key") + "," + Encode(data.assetId ?? data.name));
-            sb.AppendLine("," + Encode(data.assetId ?? data.name));
-            foreach (var e in data.entries)
+            sb.AppendLine(Encode("Key") + "," + Encode(doc.DisplayName));
+            sb.AppendLine("," + Encode(doc.AssetId));
+            foreach (var e in doc.Entries)
             {
-                if (e.hint != LexiconHintType.String) continue;
-                sb.AppendLine(Encode(e.key) + "," + Encode(e.stringValue ?? ""));
+                if (e.Hint != LexiconHintType.String) continue;
+                sb.AppendLine(Encode(e.Key) + "," + Encode(e.StringValue ?? ""));
             }
             return sb.ToString();
         }
 
-        // Multi export: Col 0 = key, Col N = value per asset (all string entries).
+        // Multi export: Col 0 = key, Col N = value per document (all string entries).
         // Row 0 = human-readable headers, Row 1 = asset IDs, Row 2+ = data.
-        public static string ExportMulti(IEnumerable<LexiconData> datasets)
+        internal static string ExportMulti(IEnumerable<HelexDocument> docs)
         {
-            var list = new List<LexiconData>(datasets);
+            var list = new List<HelexDocument>(docs);
             if (list.Count == 0) return "";
 
-            var allKeys = new HashSet<string>();
+            var allKeys = new System.Collections.Generic.HashSet<string>();
             foreach (var d in list)
-                foreach (var e in d.entries)
-                    if (e.hint == LexiconHintType.String && !string.IsNullOrWhiteSpace(e.key))
-                        allKeys.Add(e.key);
+                foreach (var e in d.Entries)
+                    if (e.Hint == LexiconHintType.String && !string.IsNullOrWhiteSpace(e.Key))
+                        allKeys.Add(e.Key);
 
             var keys = new List<string>(allKeys);
             keys.Sort();
 
             var sb = new StringBuilder();
 
-            // Row 0: human-readable headers
             sb.Append(Encode("Key"));
-            foreach (var d in list) sb.Append("," + Encode(d.assetId ?? d.name));
+            foreach (var d in list) sb.Append("," + Encode(d.DisplayName));
             sb.AppendLine();
 
-            // Row 1: asset IDs used for import column mapping
             sb.Append("");
-            foreach (var d in list) sb.Append("," + Encode(d.assetId ?? d.name));
+            foreach (var d in list) sb.Append("," + Encode(d.AssetId));
             sb.AppendLine();
 
-            // Row 2+: data
             foreach (var key in keys)
             {
                 sb.Append(Encode(key));
                 foreach (var d in list)
                 {
                     var val = "";
-                    foreach (var e in d.entries)
-                        if (e.key == key && e.hint == LexiconHintType.String) { val = e.stringValue ?? ""; break; }
+                    foreach (var e in d.Entries)
+                        if (e.Key == key && e.Hint == LexiconHintType.String) { val = e.StringValue ?? ""; break; }
                     sb.Append("," + Encode(val));
                 }
                 sb.AppendLine();
@@ -67,10 +64,9 @@ namespace Heathen.Lexicon.Editor
         }
 
         // Import: Row 0 = headers (ignored), Row 1 = asset IDs, Row 2+ = data rows.
-        // Single import reads Col 0 + Col 1 only; multi reads all value columns.
-        public static void ImportMulti(string csv, IEnumerable<LexiconData> datasets)
+        internal static void ImportMulti(string csv, IEnumerable<HelexDocument> docs)
         {
-            var list = new List<LexiconData>(datasets);
+            var list = new List<HelexDocument>(docs);
             var rows = ParseCsv(csv);
 
             if (rows.Count < 3)
@@ -79,62 +75,50 @@ namespace Heathen.Lexicon.Editor
                 return;
             }
 
-            // Row 1: map column index -> dataset by asset ID
-            var idRow       = rows[1];
-            var colToData   = new Dictionary<int, LexiconData>();
+            // Row 1: map column index -> document by assetId
+            var idRow     = rows[1];
+            var colToDoc  = new Dictionary<int, HelexDocument>();
             for (int col = 1; col < idRow.Count; col++)
             {
                 var id = idRow[col];
                 foreach (var d in list)
-                    if ((d.assetId ?? d.name) == id) { colToData[col] = d; break; }
-            }
-
-            // Build per-asset key -> entry index maps for fast upsert
-            var indexMaps = new Dictionary<LexiconData, Dictionary<string, int>>();
-            foreach (var d in colToData.Values)
-            {
-                if (indexMaps.ContainsKey(d)) continue;
-                var map = new Dictionary<string, int>();
-                for (int i = 0; i < d.entries.Count; i++)
-                    if (!string.IsNullOrWhiteSpace(d.entries[i].key))
-                        map[d.entries[i].key] = i;
-                indexMaps[d] = map;
+                    if (d.AssetId == id || d.DisplayName == id) { colToDoc[col] = d; break; }
             }
 
             // Row 2+: upsert
+            bool anyWritten = false;
             for (int row = 2; row < rows.Count; row++)
             {
                 var cols = rows[row];
                 if (cols.Count == 0 || string.IsNullOrWhiteSpace(cols[0])) continue;
                 var key = cols[0];
 
-                foreach (var kv in colToData)
+                foreach (var kv in colToDoc)
                 {
                     if (kv.Key >= cols.Count) continue;
-                    var val  = cols[kv.Key];
-                    var d    = kv.Value;
-                    var imap = indexMaps[d];
-
-                    if (imap.TryGetValue(key, out var idx))
+                    var val = cols[kv.Key];
+                    var doc = kv.Value;
+                    var idx = doc.Entries.FindIndex(e => e.Key == key);
+                    if (idx >= 0)
                     {
-                        var entry = d.entries[idx];
-                        entry.stringValue = val;
-                        d.entries[idx] = entry;
+                        var e = doc.Entries[idx];
+                        e.StringValue    = val;
+                        doc.Entries[idx] = e;
                     }
                     else
                     {
-                        d.entries.Add(new LexiconData.Entry { key = key, hint = LexiconHintType.String, stringValue = val });
-                        imap[key] = d.entries.Count - 1;
+                        doc.Entries.Add(new HelexEntry { Key = key, Hint = LexiconHintType.String, StringValue = val });
                     }
-
-                    EditorUtility.SetDirty(d);
+                    anyWritten = true;
                 }
             }
 
-            AssetDatabase.SaveAssets();
+            if (anyWritten)
+                foreach (var kv in colToDoc)
+                    LexiconSettingsProvider.WriteHelexDoc(kv.Value);
         }
 
-        // RFC 4180 field encode: wraps in quotes when the value contains commas, quotes, or newlines.
+        // RFC 4180 field encode.
         private static string Encode(string s)
         {
             if (string.IsNullOrEmpty(s)) return "";
@@ -143,7 +127,7 @@ namespace Heathen.Lexicon.Editor
             return s;
         }
 
-        // RFC 4180 parse: handles quoted fields, embedded newlines, and escaped quotes.
+        // RFC 4180 parse.
         private static List<List<string>> ParseCsv(string csv)
         {
             var result = new List<List<string>>();

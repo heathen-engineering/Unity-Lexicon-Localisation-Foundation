@@ -23,7 +23,7 @@ namespace Heathen.Lexicon.Editor
         //   • separator
         //   • "Key: dot.path.key"  (disabled info row, Localised only)
         //   • separator
-        //   • all available keys from LexiconData assets, dot-path → submenu hierarchy
+        //   • all available keys from .helex source files, dot-path → submenu hierarchy
         //     clicking a key sets Localised mode + that key in one action
         public override void OnGUI(Rect position, SerializedProperty property, GUIContent label)
         {
@@ -97,37 +97,25 @@ namespace Heathen.Lexicon.Editor
                 menu.AddSeparator("");
             }
 
-            // ── Key picker — all LexiconData assets, dot-path as submenu ────
-            var guids  = AssetDatabase.FindAssets("t:LexiconData");
-            var seen   = new HashSet<string>();
-            bool found = false;
-
-            foreach (var guid in guids)
+            // ── Key picker — all .helex files, dot-path as submenu ──────────
+            var allKeys = LexiconSettingsProvider.GetAllLexiconKeys();
+            bool found  = false;
+            foreach (var k in allKeys)
             {
-                var path = AssetDatabase.GUIDToAssetPath(guid);
-                var data = AssetDatabase.LoadAssetAtPath<LexiconData>(path);
-                if (data == null) continue;
-
-                foreach (var entry in data.entries)
+                found = true;
+                bool isCurrent = isLoc && currentKey == k;
+                var capMod = modeProp;
+                var capKv  = kvProp;
+                menu.AddItem(new GUIContent(k.Replace('.', '/')), isCurrent, () =>
                 {
-                    if (string.IsNullOrWhiteSpace(entry.key) || !seen.Add(entry.key)) continue;
-                    found = true;
-                    var k = entry.key;
-                    bool isCurrent = isLoc && currentKey == k;
-                    // Capture for lambda
-                    var capMod = modeProp;
-                    var capKv  = kvProp;
-                    menu.AddItem(new GUIContent(k.Replace('.', '/')), isCurrent, () =>
-                    {
-                        capMod.enumValueIndex = (int)LexiconLocMode.Localised;
-                        capKv.stringValue     = k;
-                        capMod.serializedObject.ApplyModifiedProperties();
-                    });
-                }
+                    capMod.enumValueIndex = (int)LexiconLocMode.Localised;
+                    capKv.stringValue     = k;
+                    capMod.serializedObject.ApplyModifiedProperties();
+                });
             }
 
             if (!found)
-                menu.AddDisabledItem(new GUIContent("(no LexiconData assets found)"));
+                menu.AddDisabledItem(new GUIContent("(no .helex files found)"));
 
             menu.ShowAsContext();
         }

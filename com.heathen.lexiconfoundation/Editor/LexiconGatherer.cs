@@ -45,23 +45,33 @@ namespace Heathen.Lexicon.Editor
             return results;
         }
 
-        public static void Commit(List<ScanResult> confirmed, LexiconData target)
+        public static void CommitToHelex(List<ScanResult> confirmed, string helexPath)
         {
-            if (target == null || confirmed.Count == 0) return;
+            if (string.IsNullOrEmpty(helexPath) || confirmed.Count == 0) return;
 
-            var so          = new SerializedObject(target);
-            var entriesProp = so.FindProperty("entries");
+            var doc         = LexiconSettingsProvider.ReadHelexDoc(helexPath);
             var dirtyScenes = new HashSet<string>();
 
             foreach (var r in confirmed)
             {
                 if (string.IsNullOrWhiteSpace(r.ProposedKey)) continue;
 
-                entriesProp.arraySize++;
-                var ep = entriesProp.GetArrayElementAtIndex(entriesProp.arraySize - 1);
-                ep.FindPropertyRelative("key").stringValue         = r.ProposedKey;
-                ep.FindPropertyRelative("hint").enumValueIndex     = (int)LexiconHintType.String;
-                ep.FindPropertyRelative("stringValue").stringValue = r.LiteralValue;
+                var idx = doc.Entries.FindIndex(e => e.Key == r.ProposedKey);
+                if (idx >= 0)
+                {
+                    var e = doc.Entries[idx];
+                    e.StringValue    = r.LiteralValue;
+                    doc.Entries[idx] = e;
+                }
+                else
+                {
+                    doc.Entries.Add(new HelexEntry
+                    {
+                        Key         = r.ProposedKey,
+                        Hint        = LexiconHintType.String,
+                        StringValue = r.LiteralValue
+                    });
+                }
 
                 if (r.IsPrefab)
                     PatchPrefabField(r.SourcePath, r.ComponentIndex, r.FieldName, r.ProposedKey);
@@ -72,8 +82,7 @@ namespace Heathen.Lexicon.Editor
                 }
             }
 
-            so.ApplyModifiedProperties();
-            EditorUtility.SetDirty(target);
+            LexiconSettingsProvider.WriteHelexDoc(doc);
 
             foreach (var scenePath in dirtyScenes)
             {
@@ -81,9 +90,8 @@ namespace Heathen.Lexicon.Editor
                 if (scene.IsValid()) EditorSceneManager.MarkSceneDirty(scene);
             }
 
-            AssetDatabase.SaveAssets();
             LexiconDataEditor.ForceRefresh();
-            Debug.Log($"[Lexicon] Committed {confirmed.Count} entries to {target.name}.");
+            Debug.Log($"[Lexicon] Committed {confirmed.Count} entries to {System.IO.Path.GetFileName(helexPath)}.");
         }
 
         private static void ScanGameObject(GameObject root, string sourcePath, bool isPrefab, List<ScanResult> results)

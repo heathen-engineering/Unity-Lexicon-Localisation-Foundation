@@ -58,30 +58,21 @@ namespace Heathen.Lexicon.Editor
 
         private static void ShowKeyPicker(SerializedProperty keyProp)
         {
-            var guids = AssetDatabase.FindAssets("t:LexiconData");
-            var menu = new GenericMenu();
-            var seen = new HashSet<string>();
-
-            foreach (var guid in guids)
+            var menu  = new GenericMenu();
+            var keys  = LexiconSettingsProvider.GetAllLexiconKeys();
+            int count = 0;
+            foreach (var k in keys)
             {
-                var data = AssetDatabase.LoadAssetAtPath<LexiconData>(AssetDatabase.GUIDToAssetPath(guid));
-                if (data == null) continue;
-                foreach (var entry in data.entries)
+                count++;
+                menu.AddItem(new GUIContent(k.Replace('.', '/')), keyProp.stringValue == k, () =>
                 {
-                    if (string.IsNullOrWhiteSpace(entry.key)) continue;
-                    if (entry.hint != LexiconHintType.Sound) continue;
-                    if (!seen.Add(entry.key)) continue;
-                    var k = entry.key;
-                    menu.AddItem(new GUIContent(k.Replace('.', '/')), keyProp.stringValue == k, () =>
-                    {
-                        keyProp.stringValue = k;
-                        keyProp.serializedObject.ApplyModifiedProperties();
-                    });
-                }
+                    keyProp.stringValue = k;
+                    keyProp.serializedObject.ApplyModifiedProperties();
+                });
             }
 
-            if (seen.Count == 0)
-                menu.AddDisabledItem(new GUIContent("(no Sound keys found)"));
+            if (count == 0)
+                menu.AddDisabledItem(new GUIContent("(no .helex files found)"));
 
             menu.ShowAsContext();
         }
