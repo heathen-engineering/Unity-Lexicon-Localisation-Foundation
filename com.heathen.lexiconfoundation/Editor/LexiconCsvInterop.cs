@@ -1,13 +1,16 @@
 using System.Collections.Generic;
 using System.Text;
+using UnityEditor;
 using UnityEngine;
+using Object = UnityEngine.Object;
 
 namespace Heathen.Lexicon.Editor
 {
     public static class LexiconCsvInterop
     {
         // Single export: Col 0 = key, Col 1 = value for this document.
-        internal static string ExportSingle(HelexDocument doc)
+        // textOnly = true (default): only String entries. false: also exports asset paths.
+        internal static string ExportSingle(HelexDocument doc, bool textOnly = true)
         {
             if (doc == null) return "";
             var sb = new StringBuilder();
@@ -15,15 +18,17 @@ namespace Heathen.Lexicon.Editor
             sb.AppendLine("," + Encode(doc.AssetId));
             foreach (var e in doc.Entries)
             {
-                if (e.Hint != LexiconHintType.String) continue;
-                sb.AppendLine(Encode(e.Key) + "," + Encode(e.StringValue ?? ""));
+                if (e.Hint == LexiconHintType.String)
+                    sb.AppendLine(Encode(e.Key) + "," + Encode(e.StringValue ?? ""));
+                else if (!textOnly)
+                    sb.AppendLine(Encode(e.Key) + "," + Encode(e.AssetPath ?? ""));
             }
             return sb.ToString();
         }
 
-        // Multi export: Col 0 = key, Col N = value per document (all string entries).
+        // Multi export: Col 0 = key, Col N = value per document.
         // Row 0 = human-readable headers, Row 1 = asset IDs, Row 2+ = data.
-        internal static string ExportMulti(IEnumerable<HelexDocument> docs)
+        internal static string ExportMulti(IEnumerable<HelexDocument> docs, bool textOnly = true)
         {
             var list = new List<HelexDocument>(docs);
             if (list.Count == 0) return "";
@@ -31,8 +36,10 @@ namespace Heathen.Lexicon.Editor
             var allKeys = new System.Collections.Generic.HashSet<string>();
             foreach (var d in list)
                 foreach (var e in d.Entries)
-                    if (e.Hint == LexiconHintType.String && !string.IsNullOrWhiteSpace(e.Key))
-                        allKeys.Add(e.Key);
+                {
+                    if (string.IsNullOrWhiteSpace(e.Key)) continue;
+                    if (e.Hint == LexiconHintType.String || !textOnly) allKeys.Add(e.Key);
+                }
 
             var keys = new List<string>(allKeys);
             keys.Sort();
@@ -54,7 +61,11 @@ namespace Heathen.Lexicon.Editor
                 {
                     var val = "";
                     foreach (var e in d.Entries)
-                        if (e.Key == key && e.Hint == LexiconHintType.String) { val = e.StringValue ?? ""; break; }
+                        if (e.Key == key)
+                        {
+                            val = e.Hint == LexiconHintType.String ? (e.StringValue ?? "") : (e.AssetPath ?? "");
+                            break;
+                        }
                     sb.Append("," + Encode(val));
                 }
                 sb.AppendLine();
@@ -64,6 +75,7 @@ namespace Heathen.Lexicon.Editor
         }
 
         // Import: Row 0 = headers (ignored), Row 1 = asset IDs, Row 2+ = data rows.
+        // Values that look like asset paths (start with "Assets/") are reconciled as asset references.
         internal static void ImportMulti(string csv, IEnumerable<HelexDocument> docs)
         {
             var list = new List<HelexDocument>(docs);
@@ -75,9 +87,8 @@ namespace Heathen.Lexicon.Editor
                 return;
             }
 
-            // Row 1: map column index -> document by assetId
-            var idRow     = rows[1];
-            var colToDoc  = new Dictionary<int, HelexDocument>();
+            var idRow    = rows[1];
+            var colToDoc = new Dictionary<int, HelexDocument>();
             for (int col = 1; col < idRow.Count; col++)
             {
                 var id = idRow[col];
@@ -85,7 +96,6 @@ namespace Heathen.Lexicon.Editor
                     if (d.AssetId == id || d.DisplayName == id) { colToDoc[col] = d; break; }
             }
 
-            // Row 2+: upsert
             bool anyWritten = false;
             for (int row = 2; row < rows.Count; row++)
             {
@@ -99,16 +109,33 @@ namespace Heathen.Lexicon.Editor
                     var val = cols[kv.Key];
                     var doc = kv.Value;
                     var idx = doc.Entries.FindIndex(e => e.Key == key);
-                    if (idx >= 0)
+
+                    // Reconcile: if value looks like an asset path, try to load it.
+                    HelexEntry newEntry;
+                    if (val.StartsWith("Assets/") || val.StartsWith("assets/"))
                     {
-                        var e = doc.Entries[idx];
-                        e.StringValue    = val;
-                        doc.Entries[idx] = e;
+                        var asset = AssetDatabase.LoadAssetAtPath<Object>(val);
+                        if (asset != null)
+                        {
+                            newEntry = new HelexEntry
+                            {
+                                Key       = key,
+                                Hint      = HintFromAsset(asset),
+                                AssetPath = val,
+                            };
+                        }
+                        else
+                        {
+                            newEntry = new HelexEntry { Key = key, Hint = LexiconHintType.String, StringValue = val };
+                        }
                     }
                     else
                     {
-                        doc.Entries.Add(new HelexEntry { Key = key, Hint = LexiconHintType.String, StringValue = val });
+                        newEntry = new HelexEntry { Key = key, Hint = LexiconHintType.String, StringValue = val };
                     }
+
+                    if (idx >= 0) doc.Entries[idx] = newEntry;
+                    else          doc.Entries.Add(newEntry);
                     anyWritten = true;
                 }
             }
@@ -117,6 +144,15 @@ namespace Heathen.Lexicon.Editor
                 foreach (var kv in colToDoc)
                     LexiconSettingsProvider.WriteHelexDoc(kv.Value);
         }
+
+        private static LexiconHintType HintFromAsset(Object asset) => asset switch
+        {
+            AudioClip  _ => LexiconHintType.Sound,
+            Texture2D  _ => LexiconHintType.Texture,
+            Sprite     _ => LexiconHintType.Sprite,
+            GameObject _ => LexiconHintType.Prefab,
+            _            => LexiconHintType.Asset,
+        };
 
         // RFC 4180 field encode.
         private static string Encode(string s)

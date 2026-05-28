@@ -145,6 +145,30 @@ namespace Heathen.Lexicon.Editor
             so.ApplyModifiedProperties();
         }
 
+        // Patches scene objects and prefab fields to Localised mode — no JSON writing.
+        // Use this when the settings provider handles all .helex writes.
+        public static void PatchFields(List<ScanResult> confirmed)
+        {
+            if (confirmed == null || confirmed.Count == 0) return;
+            var dirtyScenes = new HashSet<string>();
+            foreach (var r in confirmed)
+            {
+                if (string.IsNullOrWhiteSpace(r.ProposedKey)) continue;
+                if (r.IsPrefab)
+                    PatchPrefabField(r.SourcePath, r.ComponentIndex, r.FieldName, r.ProposedKey);
+                else if (r.LiveComp != null)
+                {
+                    PatchLiveField(r.LiveComp, r.FieldName, r.ProposedKey);
+                    dirtyScenes.Add(r.SourcePath);
+                }
+            }
+            foreach (var scenePath in dirtyScenes)
+            {
+                var scene = EditorSceneManager.GetSceneByPath(scenePath);
+                if (scene.IsValid()) EditorSceneManager.MarkSceneDirty(scene);
+            }
+        }
+
         private static string GenerateKey(string typeName, string fieldName)
         {
             var seg = System.Text.RegularExpressions.Regex.Replace(fieldName, @"^[_m]_?", "");

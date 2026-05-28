@@ -12,10 +12,11 @@ namespace Heathen.Lexicon
         private static readonly List<LexiconCompiledData> _registeredCompiledData = new();
         // culture code -> (hash -> entry)
         private static readonly Dictionary<string, Dictionary<ulong, LexiconData.Entry>> _cultures = new();
-        private static string     _activeCulture;
-        private static string     _defaultCulture;
-        // The asset literally named "Default" — used as the unconditional fallback for unindexed keys
-        private static LexiconData _defaultData;
+        private static string           _activeCulture;
+        private static string           _defaultCulture;
+        // The asset literally named "Default" — unconditional last-resort fallback
+        private static LexiconData         _defaultData;
+        private static LexiconCompiledData _defaultCompiledData;
 
         public static event Action<string> CultureChanged;
         public static event Action<string> DefaultCultureChanged;
@@ -26,9 +27,10 @@ namespace Heathen.Lexicon
             _registeredData.Clear();
             _registeredCompiledData.Clear();
             _cultures.Clear();
-            _activeCulture  = null;
-            _defaultCulture = null;
-            _defaultData    = null;
+            _activeCulture       = null;
+            _defaultCulture      = null;
+            _defaultData         = null;
+            _defaultCompiledData = null;
 
             // Compiled .helex assets — pre-hashed at import time, zero hashing work here.
             var compiled = Resources.LoadAll<LexiconCompiledData>("");
@@ -43,6 +45,12 @@ namespace Heathen.Lexicon
                 if (IsDefaultAsset(asset) && asset.autoRegister) Register(asset);
             foreach (var asset in assets)
                 if (!IsDefaultAsset(asset) && asset.autoRegister) Register(asset);
+
+            // Auto-detect system locale. Sets _activeCulture directly without firing the event
+            // since no listeners are registered this early in startup.
+            var systemCulture = System.Globalization.CultureInfo.CurrentCulture.Name;
+            if (!string.IsNullOrEmpty(systemCulture))
+                _activeCulture = systemCulture;
         }
 
         public static void Register(LexiconData data)
@@ -66,10 +74,8 @@ namespace Heathen.Lexicon
             _registeredCompiledData.Add(data);
             AddCulturesFrom(data);
 
-            if (_defaultCulture == null && data.Cultures?.Length > 0)
-                _defaultCulture = data.Cultures[0];
-            if (_activeCulture == null && data.Cultures?.Length > 0)
-                _activeCulture = data.Cultures[0];
+            if (IsDefaultCompiledAsset(data))
+                _defaultCompiledData = data;
         }
 
         public static bool IsDefaultCompiledAsset(LexiconCompiledData data) =>
@@ -88,21 +94,23 @@ namespace Heathen.Lexicon
             RebuildAllCultures();
         }
 
-        public static void LoadCulture(string cultureCode)
+        // Primary game-dev API: call this from a language settings menu or on startup.
+        // Finds the helex that serves cultureCode (exact, then base-language prefix),
+        // falling back to the Default helex if nothing matches.
+        public static void UseCulture(string cultureCode)
         {
             _activeCulture = cultureCode;
             CultureChanged?.Invoke(cultureCode);
         }
 
-        public static void SetDefaultCulture(string cultureCode)
-        {
-            _defaultCulture = cultureCode;
-            DefaultCultureChanged?.Invoke(cultureCode);
-        }
+        // Backwards-compatible alias.
+        public static void LoadCulture(string cultureCode) => UseCulture(cultureCode);
 
         public static string GetActiveCulture() => _activeCulture;
 
-        public static IEnumerable<string> GetAvailableCultureCodes() => _cultures.Keys;
+        // Returns the culture codes that have at least one helex mapped to them —
+        // useful for populating a language-selection menu.
+        public static IEnumerable<string> GetMappedCultureCodes() => _cultures.Keys;
 
         public static IEnumerable<string> GetAvailableAssetIds()
         {
@@ -218,26 +226,46 @@ namespace Heathen.Lexicon
 
         private static bool TryGetEntry(ulong key, out LexiconData.Entry entry)
         {
-            if (_activeCulture != null && _cultures.TryGetValue(_activeCulture, out var active))
-                if (active.TryGetValue(key, out entry))
-                    return true;
-
-            if (_defaultCulture != null && _defaultCulture != _activeCulture &&
-                _cultures.TryGetValue(_defaultCulture, out var def))
-                if (def.TryGetValue(key, out entry))
-                    return true;
-
-            // Last resort: search the Default data asset directly
-            // (covers keys not indexed under any declared culture code)
+            // 1. Exact active culture (e.g. "fr-CA")
+            if (TryGetFromCulture(_activeCulture, key, out entry)) return true;
+            // 2. Base language of active culture (e.g. "fr")
+            if (TryGetFromCulture(BaseCulture(_activeCulture), key, out entry)) return true;
+            // 3. Exact default culture
+            if (_defaultCulture != null && _defaultCulture != _activeCulture)
+            {
+                if (TryGetFromCulture(_defaultCulture, key, out entry)) return true;
+                if (TryGetFromCulture(BaseCulture(_defaultCulture), key, out entry)) return true;
+            }
+            // 4. Last resort: Default helex entries not indexed under any culture code
+            if (_defaultCompiledData?.Entries != null)
+                foreach (var e in _defaultCompiledData.Entries)
+                    if (e.Hash == key)
+                    {
+                        entry = new LexiconData.Entry { key = e.Key, hint = e.Hint, stringValue = e.StringValue, assetValue = e.AssetValue };
+                        return true;
+                    }
             if (_defaultData != null)
                 foreach (var e in _defaultData.entries)
-                {
-                    if (string.IsNullOrWhiteSpace(e.key)) continue;
-                    if (Hash(e.key) == key) { entry = e; return true; }
-                }
+                    if (!string.IsNullOrWhiteSpace(e.key) && Hash(e.key) == key) { entry = e; return true; }
 
             entry = default;
             return false;
+        }
+
+        private static bool TryGetFromCulture(string culture, ulong key, out LexiconData.Entry entry)
+        {
+            if (culture != null && _cultures.TryGetValue(culture, out var dict) && dict.TryGetValue(key, out entry))
+                return true;
+            entry = default;
+            return false;
+        }
+
+        // Returns the base language tag (e.g. "fr" from "fr-CA"), or null if already a base tag.
+        private static string BaseCulture(string culture)
+        {
+            if (culture == null) return null;
+            var dash = culture.IndexOf('-');
+            return dash > 0 ? culture[..dash] : null;
         }
 
         private static void AddCulturesFrom(LexiconData data)

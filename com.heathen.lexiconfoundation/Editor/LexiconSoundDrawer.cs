@@ -1,4 +1,3 @@
-using System.Collections.Generic;
 using UnityEditor;
 using UnityEngine;
 
@@ -59,7 +58,7 @@ namespace Heathen.Lexicon.Editor
         private static void ShowKeyPicker(SerializedProperty keyProp)
         {
             var menu  = new GenericMenu();
-            var keys  = LexiconSettingsProvider.GetAllLexiconKeys();
+            var keys  = LexiconSettingsProvider.GetAllLexiconKeys(LexiconHintType.Sound);
             int count = 0;
             foreach (var k in keys)
             {
@@ -70,10 +69,8 @@ namespace Heathen.Lexicon.Editor
                     keyProp.serializedObject.ApplyModifiedProperties();
                 });
             }
-
             if (count == 0)
-                menu.AddDisabledItem(new GUIContent("(no .helex files found)"));
-
+                menu.AddDisabledItem(new GUIContent("(no sound keys found)"));
             menu.ShowAsContext();
         }
     }

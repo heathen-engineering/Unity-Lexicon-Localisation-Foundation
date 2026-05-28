@@ -12,25 +12,19 @@ namespace Heathen.Lexicon.Editor
 {
     public class LexiconSettingsProvider : SettingsProvider
     {
-        private const string ActiveCultureKey  = "Heathen.Lexicon.ActiveCulture";
-        private const string DefaultCultureKey = "Heathen.Lexicon.DefaultCulture";
         private const float  TreeWidth         = 220f;
-        private const float  PanelHeight       = 520f;
+        private const float  PanelHeight       = 500f;
         private const float  TypeColWidth      = 68f;
         private const float  KeyColWidth       = 170f;
-        private const float  StatusColWidth    = 62f;
+        private const float  DeleteBtnW        = 22f;
 
-        public static string EditorActiveCulture
+        // Hint options excluding None, sorted alphabetically
+        private static readonly LexiconHintType[] HintOptions =
         {
-            get => EditorPrefs.GetString(ActiveCultureKey, "");
-            set { EditorPrefs.SetString(ActiveCultureKey, value); LexiconRegistry.LoadCulture(value); }
-        }
-
-        public static string EditorDefaultCulture
-        {
-            get => EditorPrefs.GetString(DefaultCultureKey, "");
-            set { EditorPrefs.SetString(DefaultCultureKey, value); LexiconRegistry.SetDefaultCulture(value); }
-        }
+            LexiconHintType.Asset, LexiconHintType.Prefab, LexiconHintType.Sound,
+            LexiconHintType.Sprite, LexiconHintType.String, LexiconHintType.Texture,
+        };
+        private static readonly string[] HintOptionNames = HintOptions.Select(h => h.ToString()).ToArray();
 
         [SettingsProvider]
         public static SettingsProvider Create() =>
@@ -39,37 +33,47 @@ namespace Heathen.Lexicon.Editor
                 keywords = new HashSet<string>(new[] { "lexicon", "localisation", "culture", "heathen", "translation" })
             };
 
-        // ── Window mode ───────────────────────────────────────────────────────────
+        // ── Mode ──────────────────────────────────────────────────────────────────
 
         private enum Mode { Workbench, Gather, Csv }
         private Mode _mode;
 
-        // ── Workbench state ───────────────────────────────────────────────────────
+        // ── Document model ────────────────────────────────────────────────────────
 
         private List<HelexDocument> _allDocs     = new();
-        private string[]            _allDocNames = Array.Empty<string>();
-        private HelexDocument       _sourceDoc;
-        private HelexDocument       _activeDoc;
+        private HelexDocument       _defaultDoc;
+        private List<HelexDocument> _extraCols   = new(); // additional columns in workbench
 
-        private List<string>                     _allKeys       = new();
-        private Dictionary<string, HelexEntry>   _editedEntries = new();
+        // ── Workbench state ───────────────────────────────────────────────────────
+
+        private List<string>                   _allKeys       = new();
+        private Dictionary<string, HelexEntry> _editedEntries = new(); // working copy of default doc
         private string  _selectedPrefix;
-        private bool    _dirty;
-        private bool    _savePending;
         private string  _addKeyBuffer = "";
         private Vector2 _treeScroll;
         private Vector2 _workbenchScroll;
+        private bool    _culturesExpanded = true;
+        private Rect    _plusBtnRect;
+        private Dictionary<string, string> _cultureAddBuffers = new();
+
+        // ── Pending writes ────────────────────────────────────────────────────────
+
+        private readonly HashSet<string> _pendingWrites = new();
+        private bool _writePending;
+        private bool _dirty;
 
         // ── Gather state ──────────────────────────────────────────────────────────
 
-        private string _gatherTargetPath;
         private List<LexiconGatherer.ScanResult> _gatherResults = new();
         private bool    _gatherScanned;
         private Vector2 _gatherScroll;
 
         // ── CSV state ─────────────────────────────────────────────────────────────
 
-        private string _csvBuffer = "";
+        private bool   _csvTextOnly     = true;
+        private bool   _csvSingleDoc    = false;
+        private int    _csvSingleDocIdx = 0;
+        private string _csvBuffer       = "";
 
         // ── Constructor & activation ──────────────────────────────────────────────
 
@@ -79,7 +83,8 @@ namespace Heathen.Lexicon.Editor
 
         public override void OnDeactivate()
         {
-            if (_dirty) CommitEditedToDoc();
+            if (_dirty) FlushDefaultDoc();
+            FlushPendingWrites();
         }
 
         // ── Main GUI ──────────────────────────────────────────────────────────────
@@ -104,41 +109,75 @@ namespace Heathen.Lexicon.Editor
         {
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
 
-            EditorGUILayout.BeginHorizontal();
-
-            var srcIdx    = _sourceDoc == null ? 0 : _allDocs.IndexOf(_sourceDoc);
-            EditorGUI.BeginChangeCheck();
-            var newSrcIdx = EditorGUILayout.Popup("Source", Mathf.Max(0, srcIdx), _allDocNames);
-            if (EditorGUI.EndChangeCheck() && newSrcIdx >= 0 && newSrcIdx < _allDocs.Count)
+            // Per-file cultures
+            _culturesExpanded = EditorGUILayout.Foldout(_culturesExpanded, "Source Files");
+            if (_culturesExpanded)
             {
-                _sourceDoc = _allDocs[newSrcIdx];
-                Rebuild();
+                EditorGUI.indentLevel++;
+                foreach (var doc in _allDocs)
+                {
+                    if (!_cultureAddBuffers.ContainsKey(doc.Path))
+                        _cultureAddBuffers[doc.Path] = "";
+
+                    EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+                    EditorGUILayout.LabelField(doc.DisplayName, EditorStyles.boldLabel);
+
+                    // Chip strip
+                    EditorGUILayout.BeginHorizontal();
+                    foreach (var culture in doc.Cultures.ToList())
+                    {
+                        var prevBg = GUI.backgroundColor;
+                        GUI.backgroundColor = new Color(0.65f, 0.85f, 1f);
+                        if (GUILayout.Button(culture + "  ✕", EditorStyles.miniButton, GUILayout.ExpandWidth(false)))
+                        {
+                            GUI.backgroundColor = prevBg;
+                            doc.Cultures.Remove(culture);
+                            MarkDocPending(doc.Path);
+                            GUIUtility.ExitGUI();
+                        }
+                        GUI.backgroundColor = prevBg;
+                    }
+                    if (doc.Cultures.Count == 0)
+                    {
+                        var hint = IsDefaultDoc(doc)
+                            ? "(fallback for unmatched cultures — add a code e.g. \"en\" to also route explicitly)"
+                            : "(inactive — add at least one culture code)";
+                        GUILayout.Label(hint, EditorStyles.miniLabel);
+                    }
+                    EditorGUILayout.EndHorizontal();
+
+                    // Filter + add row
+                    var ctrlName = "CultureAdd_" + doc.Path.GetHashCode().ToString();
+                    EditorGUILayout.BeginHorizontal();
+                    GUI.SetNextControlName(ctrlName);
+                    _cultureAddBuffers[doc.Path] = EditorGUILayout.TextField(
+                        _cultureAddBuffers[doc.Path], GUILayout.ExpandWidth(true));
+                    // Placeholder text when empty and unfocused
+                    if (string.IsNullOrEmpty(_cultureAddBuffers[doc.Path])
+                        && GUI.GetNameOfFocusedControl() != ctrlName
+                        && Event.current.type == EventType.Repaint)
+                    {
+                        var r = GUILayoutUtility.GetLastRect();
+                        EditorGUI.LabelField(new Rect(r.x + 3, r.y, r.width - 3, r.height),
+                            "type to search (e.g. fr, French, Canada)…",
+                            new GUIStyle(EditorStyles.label) { normal = { textColor = new Color(0.5f, 0.5f, 0.5f) } });
+                    }
+                    bool enterPressed = Event.current.type == EventType.KeyDown
+                        && (Event.current.keyCode == KeyCode.Return || Event.current.keyCode == KeyCode.KeypadEnter)
+                        && GUI.GetNameOfFocusedControl() == ctrlName;
+                    if (GUILayout.Button("+", GUILayout.Width(22)) || enterPressed)
+                    {
+                        if (enterPressed) Event.current.Use();
+                        ShowCulturePicker(doc, _cultureAddBuffers[doc.Path]);
+                    }
+                    EditorGUILayout.EndHorizontal();
+
+                    EditorGUILayout.EndVertical();
+                }
+                if (GUILayout.Button("New Culture File…", GUILayout.Width(140)))
+                    CreateNewCultureDocument();
+                EditorGUI.indentLevel--;
             }
-
-            var actOptions = new string[_allDocNames.Length + 1];
-            actOptions[0] = "(none)";
-            _allDocNames.CopyTo(actOptions, 1);
-            var actIdx    = _activeDoc == null ? 0 : _allDocs.IndexOf(_activeDoc) + 1;
-            EditorGUI.BeginChangeCheck();
-            var newActIdx = EditorGUILayout.Popup("Active", Mathf.Max(0, actIdx), actOptions);
-            if (EditorGUI.EndChangeCheck())
-            {
-                if (_dirty) CommitEditedToDoc();
-                _activeDoc = newActIdx == 0 ? null : _allDocs[newActIdx - 1];
-                _dirty = false;
-                Rebuild();
-            }
-
-            EditorGUILayout.EndHorizontal();
-
-            var cultures = CollectCultureCodes();
-            var arr      = cultures.ToArray();
-            EditorGUILayout.BeginHorizontal();
-            DrawCulturePicker("Preview Active",  EditorActiveCulture,  arr, v => EditorActiveCulture  = v);
-            DrawCulturePicker("Preview Default", EditorDefaultCulture, arr, v => EditorDefaultCulture = v);
-            if (GUILayout.Button("New Culture…", GUILayout.Width(108)))
-                CreateNewCultureDocument();
-            EditorGUILayout.EndHorizontal();
 
             EditorGUILayout.EndVertical();
         }
@@ -183,11 +222,25 @@ namespace Heathen.Lexicon.Editor
 
         private void DrawAddKeyRow()
         {
+            const string ctrlName = "LexiconAddKey";
             EditorGUILayout.BeginHorizontal();
+            GUI.SetNextControlName(ctrlName);
             _addKeyBuffer = EditorGUILayout.TextField(_addKeyBuffer);
-            using (new EditorGUI.DisabledScope(string.IsNullOrWhiteSpace(_addKeyBuffer)))
-                if (GUILayout.Button("+", GUILayout.Width(22)))
-                    AddKey(_addKeyBuffer.Trim());
+
+            bool enterPressed = Event.current.type == EventType.KeyDown
+                && (Event.current.keyCode == KeyCode.Return || Event.current.keyCode == KeyCode.KeypadEnter)
+                && GUI.GetNameOfFocusedControl() == ctrlName;
+
+            bool doAdd = !string.IsNullOrWhiteSpace(_addKeyBuffer)
+                      && (GUILayout.Button("+", GUILayout.Width(22)) || enterPressed);
+
+            if (doAdd)
+            {
+                if (enterPressed) Event.current.Use();
+                AddKey(_addKeyBuffer.Trim());
+                _addKeyBuffer = "";
+                GUI.FocusControl(ctrlName);
+            }
             EditorGUILayout.EndHorizontal();
         }
 
@@ -212,14 +265,13 @@ namespace Heathen.Lexicon.Editor
                 }
                 if (!groupOpen) continue;
 
-                var leaf   = key.Contains('.') ? key[(key.LastIndexOf('.') + 1)..] : key;
-                var status = EntryStatus(key);
-                var hint   = _editedEntries.TryGetValue(key, out var ee) ? ee.Hint : LexiconHintType.String;
-                var s2     = _selectedPrefix == key ? EditorStyles.boldLabel : EditorStyles.miniLabel;
+                var leaf = key.Contains('.') ? key[(key.LastIndexOf('.') + 1)..] : key;
+                var hint = _editedEntries.TryGetValue(key, out var ee) ? ee.Hint : LexiconHintType.String;
+                var s2   = _selectedPrefix == key ? EditorStyles.boldLabel : EditorStyles.miniLabel;
 
                 EditorGUILayout.BeginHorizontal();
                 GUILayout.Space(12);
-                if (GUILayout.Button($"{StatusChar(status)} [{HintAbbrev(hint)}] {leaf}", s2))
+                if (GUILayout.Button($"{EntryStatusChar(key)} [{HintAbbrev(hint)}] {leaf}", s2))
                     _selectedPrefix = (_selectedPrefix == key) ? top : key;
                 EditorGUILayout.EndHorizontal();
             }
@@ -228,18 +280,23 @@ namespace Heathen.Lexicon.Editor
         private void DrawTableHeader()
         {
             EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
+            GUILayout.Label("", GUILayout.Width(DeleteBtnW));
             GUILayout.Label("Key",  EditorStyles.boldLabel, GUILayout.Width(KeyColWidth));
             GUILayout.Label("Type", EditorStyles.boldLabel, GUILayout.Width(TypeColWidth));
-            if (_activeDoc != null)
+            GUILayout.Label("Default", EditorStyles.boldLabel, GUILayout.ExpandWidth(true));
+
+            foreach (var col in _extraCols)
+                GUILayout.Label(col.DisplayName, EditorStyles.boldLabel, GUILayout.ExpandWidth(true));
+
+            // [+] only when there are other helex files to add as columns
+            if (_allDocs.Count > 1)
             {
-                GUILayout.Label("Source", EditorStyles.boldLabel, GUILayout.ExpandWidth(true));
-                GUILayout.Label("Active", EditorStyles.boldLabel, GUILayout.ExpandWidth(true));
+                if (GUILayout.Button("+", EditorStyles.toolbarButton, GUILayout.Width(20)))
+                    UnityEditor.PopupWindow.Show(_plusBtnRect, new DocColPicker(_allDocs, _defaultDoc, _extraCols, RebuildKeyList));
+                if (Event.current.type == EventType.Repaint)
+                    _plusBtnRect = GUILayoutUtility.GetLastRect();
             }
-            else
-            {
-                GUILayout.Label("Value", EditorStyles.boldLabel, GUILayout.ExpandWidth(true));
-            }
-            GUILayout.Label("", GUILayout.Width(StatusColWidth + 22));
+
             EditorGUILayout.EndHorizontal();
         }
 
@@ -247,66 +304,54 @@ namespace Heathen.Lexicon.Editor
         {
             foreach (var key in FilterKeys())
             {
-                var status = EntryStatus(key);
-                _editedEntries.TryGetValue(key, out var act);
-
-                var srcEntry = _sourceDoc?.Entries.FirstOrDefault(e => e.Key == key);
-                var hint     = act.Hint != LexiconHintType.None ? act.Hint
-                             : (srcEntry.HasValue ? srcEntry.Value.Hint : LexiconHintType.String);
-
-                var prevBg = GUI.backgroundColor;
-                if (status != LexiconEntryStatus.OK)
-                    GUI.backgroundColor = StatusColour(status);
+                _editedEntries.TryGetValue(key, out var defEntry);
+                var hint = defEntry.Hint != LexiconHintType.None ? defEntry.Hint : LexiconHintType.String;
 
                 EditorGUILayout.BeginHorizontal();
+
+                // Delete button
+                var prevColor = GUI.contentColor;
+                GUI.contentColor = Color.red;
+                if (GUILayout.Button("✕", EditorStyles.miniButton, GUILayout.Width(DeleteBtnW)))
+                { GUI.contentColor = prevColor; DeleteKey(key); EditorGUILayout.EndHorizontal(); return; }
+                GUI.contentColor = prevColor;
+
+                // Key label
                 GUILayout.Label(key, EditorStyles.miniLabel, GUILayout.Width(KeyColWidth));
 
+                // Type dropdown (no None, alphabetical)
                 if (_editedEntries.ContainsKey(key))
                 {
+                    int hintIdx = Array.IndexOf(HintOptions, hint < LexiconHintType.String ? LexiconHintType.String : hint);
+                    if (hintIdx < 0) hintIdx = Array.IndexOf(HintOptions, LexiconHintType.String);
                     EditorGUI.BeginChangeCheck();
-                    var newHint = (LexiconHintType)EditorGUILayout.EnumPopup(act.Hint, GUILayout.Width(TypeColWidth));
-                    if (EditorGUI.EndChangeCheck()) ChangeHint(act, newHint, key);
+                    int newIdx = EditorGUILayout.Popup(hintIdx, HintOptionNames, GUILayout.Width(TypeColWidth));
+                    if (EditorGUI.EndChangeCheck()) ChangeHint(defEntry, HintOptions[newIdx], key);
                 }
                 else
                 {
                     GUILayout.Label(HintAbbrev(hint), EditorStyles.centeredGreyMiniLabel, GUILayout.Width(TypeColWidth));
                 }
 
-                if (_activeDoc != null)
+                // Default column
+                if (_editedEntries.ContainsKey(key))
                 {
-                    if (srcEntry.HasValue) DrawEntryReadOnly(srcEntry.Value);
-                    else GUILayout.Label("", GUILayout.ExpandWidth(true));
-
-                    if (_editedEntries.ContainsKey(key)) DrawEntryEditable(ref act, key);
-                    else GUILayout.Label("", GUILayout.ExpandWidth(true));
+                    var isEmpty = defEntry.IsEmpty;
+                    var prevBg  = GUI.backgroundColor;
+                    if (isEmpty) GUI.backgroundColor = new Color(0.75f, 0.75f, 0.75f);
+                    DrawEntryEditable(ref defEntry, key);
+                    GUI.backgroundColor = prevBg;
                 }
                 else
                 {
-                    if (_editedEntries.ContainsKey(key)) DrawEntryEditable(ref act, key);
-                    else GUILayout.Label("", GUILayout.ExpandWidth(true));
+                    GUILayout.Label("", GUILayout.ExpandWidth(true));
                 }
 
-                GUI.backgroundColor = prevBg;
-
-                GUILayout.Label(StatusLabel(status), EditorStyles.miniLabel, GUILayout.Width(StatusColWidth));
-                if (GUILayout.Button("✕", EditorStyles.miniButton, GUILayout.Width(20)))
-                    DeleteKey(key);
+                // Extra columns
+                foreach (var col in _extraCols)
+                    DrawExtraColCell(col, key, hint);
 
                 EditorGUILayout.EndHorizontal();
-            }
-        }
-
-        private static void DrawEntryReadOnly(HelexEntry entry)
-        {
-            if (entry.Hint == LexiconHintType.String || entry.Hint == LexiconHintType.None)
-                GUILayout.Label(entry.StringValue ?? "", EditorStyles.miniLabel, GUILayout.ExpandWidth(true));
-            else
-            {
-                using (new EditorGUI.DisabledScope(true))
-                {
-                    var asset = string.IsNullOrEmpty(entry.AssetPath) ? null : AssetDatabase.LoadAssetAtPath<Object>(entry.AssetPath);
-                    EditorGUILayout.ObjectField(asset, HintToType(entry.Hint), false, GUILayout.ExpandWidth(true));
-                }
             }
         }
 
@@ -326,16 +371,50 @@ namespace Heathen.Lexicon.Editor
             else
             {
                 EditorGUI.BeginChangeCheck();
-                var current = string.IsNullOrEmpty(entry.AssetPath) ? null : AssetDatabase.LoadAssetAtPath<Object>(entry.AssetPath);
-                var obj     = EditorGUILayout.ObjectField(current, HintToType(entry.Hint), false, GUILayout.ExpandWidth(true));
+                var cur = string.IsNullOrEmpty(entry.AssetPath) ? null : AssetDatabase.LoadAssetAtPath<Object>(entry.AssetPath);
+                var obj = EditorGUILayout.ObjectField(cur, HintToType(entry.Hint), false, GUILayout.ExpandWidth(true));
                 if (EditorGUI.EndChangeCheck())
                 {
                     entry.AssetPath     = obj == null ? "" : AssetDatabase.GetAssetPath(obj);
-                    entry.Hint          = obj == null ? entry.Hint : HintFromAsset(obj);
                     _editedEntries[key] = entry;
                     MarkDirty();
                 }
             }
+        }
+
+        private void DrawExtraColCell(HelexDocument doc, string key, LexiconHintType hint)
+        {
+            var idx   = doc.Entries.FindIndex(e => e.Key == key);
+            var entry = idx >= 0 ? doc.Entries[idx] : new HelexEntry { Key = key, Hint = hint };
+
+            var prevBg = GUI.backgroundColor;
+            if (entry.IsEmpty) GUI.backgroundColor = new Color(1f, 0.95f, 0.7f);
+
+            if (hint == LexiconHintType.String)
+            {
+                EditorGUI.BeginChangeCheck();
+                var v = EditorGUILayout.TextField(entry.StringValue ?? "", GUILayout.ExpandWidth(true));
+                if (EditorGUI.EndChangeCheck())
+                {
+                    entry.StringValue = v;
+                    if (idx >= 0) doc.Entries[idx] = entry; else doc.Entries.Add(entry);
+                    MarkDocPending(doc.Path);
+                }
+            }
+            else
+            {
+                EditorGUI.BeginChangeCheck();
+                var cur = string.IsNullOrEmpty(entry.AssetPath) ? null : AssetDatabase.LoadAssetAtPath<Object>(entry.AssetPath);
+                var obj = EditorGUILayout.ObjectField(cur, HintToType(hint), false, GUILayout.ExpandWidth(true));
+                if (EditorGUI.EndChangeCheck())
+                {
+                    entry.AssetPath = obj == null ? "" : AssetDatabase.GetAssetPath(obj);
+                    if (idx >= 0) doc.Entries[idx] = entry; else doc.Entries.Add(entry);
+                    MarkDocPending(doc.Path);
+                }
+            }
+
+            GUI.backgroundColor = prevBg;
         }
 
         // ── Gather ────────────────────────────────────────────────────────────────
@@ -344,47 +423,29 @@ namespace Heathen.Lexicon.Editor
         {
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
             EditorGUILayout.HelpBox(
-                "Scans all open scenes and project prefabs for LexiconText fields in Literal mode. " +
-                "Confirm or adjust the proposed keys, then commit — this writes entries to the target " +
-                ".helex source file and patches the source fields to Localised mode.",
+                "Scans open scenes and project prefabs for LexiconText fields in Literal mode. " +
+                "Confirm items and assign keys — each key is added to all .helex files; the " +
+                "literal value is set in the Default file and left empty in culture files.",
                 MessageType.Info);
 
             EditorGUILayout.BeginHorizontal();
-            if (_allDocNames.Length > 0)
-            {
-                var targetIdx = string.IsNullOrEmpty(_gatherTargetPath)
-                    ? 0
-                    : _allDocs.FindIndex(d => d.Path == _gatherTargetPath);
-                EditorGUI.BeginChangeCheck();
-                var newIdx = EditorGUILayout.Popup("Target File", Mathf.Max(0, targetIdx), _allDocNames);
-                if (EditorGUI.EndChangeCheck() && newIdx >= 0 && newIdx < _allDocs.Count)
-                    _gatherTargetPath = _allDocs[newIdx].Path;
-            }
-            else
-            {
-                using (new EditorGUI.DisabledScope(true))
-                    EditorGUILayout.TextField("Target File", "(no .helex files)");
-            }
-
             if (GUILayout.Button("Scan", GUILayout.Width(60)))
             {
                 _gatherResults = LexiconGatherer.Scan();
                 _gatherScanned = true;
             }
-            using (new EditorGUI.DisabledScope(!_gatherScanned || string.IsNullOrEmpty(_gatherTargetPath) || _gatherResults.Count == 0))
-                if (GUILayout.Button("Commit Selected", GUILayout.Width(120)))
-                {
-                    LexiconGatherer.CommitToHelex(_gatherResults.Where(r => r.Confirmed).ToList(), _gatherTargetPath);
-                    _gatherResults.RemoveAll(r => r.Confirmed);
-                    Rebuild();
-                }
+            var confirmed = _gatherResults.Count(r => r.Confirmed);
+            using (new EditorGUI.DisabledScope(!_gatherScanned || confirmed == 0 || _defaultDoc == null))
+            {
+                if (GUILayout.Button($"Commit {confirmed} Selected", GUILayout.Width(140)))
+                    CommitGather(_gatherResults.Where(r => r.Confirmed).ToList());
+            }
             EditorGUILayout.EndHorizontal();
 
             if (!_gatherScanned) { EditorGUILayout.EndVertical(); return; }
 
             EditorGUILayout.Space(4);
-            var confirmed = _gatherResults.Count(r => r.Confirmed);
-            EditorGUILayout.LabelField($"{_gatherResults.Count} literal fields found — {confirmed} selected for commit");
+            EditorGUILayout.LabelField($"{_gatherResults.Count} literal fields found — {confirmed} selected");
 
             _gatherScroll = EditorGUILayout.BeginScrollView(_gatherScroll, GUILayout.Height(PanelHeight - 80));
             foreach (var r in _gatherResults)
@@ -393,11 +454,47 @@ namespace Heathen.Lexicon.Editor
                 EditorGUILayout.LabelField(r.SourcePath + "  ›  " + r.FieldName, EditorStyles.miniLabel);
                 EditorGUILayout.LabelField("Value", r.LiteralValue);
                 r.ProposedKey = EditorGUILayout.TextField("Key", r.ProposedKey);
-                r.Confirmed   = EditorGUILayout.Toggle("Commit", r.Confirmed);
+                r.Confirmed   = EditorGUILayout.Toggle("Include", r.Confirmed);
                 EditorGUILayout.EndVertical();
             }
             EditorGUILayout.EndScrollView();
             EditorGUILayout.EndVertical();
+        }
+
+        private void CommitGather(List<LexiconGatherer.ScanResult> confirmed)
+        {
+            if (_defaultDoc == null || confirmed.Count == 0) return;
+
+            foreach (var r in confirmed)
+            {
+                if (string.IsNullOrWhiteSpace(r.ProposedKey)) continue;
+
+                // Set value in default doc
+                var didx = _defaultDoc.Entries.FindIndex(e => e.Key == r.ProposedKey);
+                var defEntry = new HelexEntry { Key = r.ProposedKey, Hint = LexiconHintType.String, StringValue = r.LiteralValue };
+                if (didx >= 0) _defaultDoc.Entries[didx] = defEntry;
+                else           _defaultDoc.Entries.Add(defEntry);
+
+                // Add empty entry to all other docs
+                foreach (var doc in _allDocs)
+                {
+                    if (doc == _defaultDoc) continue;
+                    if (doc.Entries.Any(e => e.Key == r.ProposedKey)) continue;
+                    doc.Entries.Add(new HelexEntry { Key = r.ProposedKey, Hint = LexiconHintType.String });
+                    MarkDocPending(doc.Path);
+                }
+            }
+
+            MarkDocPending(_defaultDoc.Path);
+            FlushPendingWrites();
+
+            // Patch scene/prefab LexiconText fields to Localised mode
+            LexiconGatherer.PatchFields(confirmed);
+
+            _gatherResults.RemoveAll(r => r.Confirmed);
+            LexiconDataEditor.ForceRefresh();
+            Rebuild();
+            Debug.Log($"[Lexicon] Gathered {confirmed.Count} entries into all .helex files.");
         }
 
         // ── CSV ───────────────────────────────────────────────────────────────────
@@ -405,23 +502,42 @@ namespace Heathen.Lexicon.Editor
         private void DrawCsv()
         {
             EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-            EditorGUILayout.LabelField("CSV Interop", EditorStyles.boldLabel);
-            EditorGUILayout.Space(4);
+            EditorGUILayout.LabelField("Export", EditorStyles.boldLabel);
 
             EditorGUILayout.BeginHorizontal();
-            using (new EditorGUI.DisabledScope(_activeDoc == null))
-            {
-                if (GUILayout.Button("Export Active (Single)"))
-                    _csvBuffer = LexiconCsvInterop.ExportSingle(_activeDoc);
-                if (GUILayout.Button("Export All Cultures (Multi)"))
-                    _csvBuffer = LexiconCsvInterop.ExportMulti(_allDocs);
-            }
-            if (GUILayout.Button("Save to File…") && !string.IsNullOrEmpty(_csvBuffer))
-            {
-                var path = EditorUtility.SaveFilePanel("Save CSV", "", "lexicon_export", "csv");
-                if (!string.IsNullOrEmpty(path)) File.WriteAllText(path, _csvBuffer);
-            }
+            _csvTextOnly  = GUILayout.Toggle(_csvTextOnly,  "Text Only",  EditorStyles.toolbarButton);
+            _csvTextOnly  = !GUILayout.Toggle(!_csvTextOnly, "All Types",  EditorStyles.toolbarButton);
+            GUILayout.Space(20);
+            _csvSingleDoc = GUILayout.Toggle(_csvSingleDoc,  "Single File", EditorStyles.toolbarButton);
+            _csvSingleDoc = !GUILayout.Toggle(!_csvSingleDoc, "All Files",   EditorStyles.toolbarButton);
             EditorGUILayout.EndHorizontal();
+
+            if (_csvSingleDoc && _allDocs.Count > 0)
+            {
+                var names = _allDocs.Select(d => d.DisplayName).ToArray();
+                _csvSingleDocIdx = Mathf.Clamp(_csvSingleDocIdx, 0, _allDocs.Count - 1);
+                _csvSingleDocIdx = EditorGUILayout.Popup("File", _csvSingleDocIdx, names);
+            }
+
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button("Export to File…"))
+            {
+                _csvBuffer = _csvSingleDoc && _allDocs.Count > 0
+                    ? LexiconCsvInterop.ExportSingle(_allDocs[_csvSingleDocIdx], _csvTextOnly)
+                    : LexiconCsvInterop.ExportMulti(_allDocs, _csvTextOnly);
+
+                if (!string.IsNullOrEmpty(_csvBuffer))
+                {
+                    var path = EditorUtility.SaveFilePanel("Export CSV", "", "lexicon_export", "csv");
+                    if (!string.IsNullOrEmpty(path)) File.WriteAllText(path, _csvBuffer);
+                }
+            }
+            if (GUILayout.Button("Copy to Clipboard") && !string.IsNullOrEmpty(_csvBuffer))
+                GUIUtility.systemCopyBuffer = _csvBuffer;
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.Space(8);
+            EditorGUILayout.LabelField("Import", EditorStyles.boldLabel);
 
             EditorGUILayout.BeginHorizontal();
             if (GUILayout.Button("Load from File…"))
@@ -430,15 +546,18 @@ namespace Heathen.Lexicon.Editor
                 if (!string.IsNullOrEmpty(path)) _csvBuffer = File.ReadAllText(path);
             }
             using (new EditorGUI.DisabledScope(string.IsNullOrEmpty(_csvBuffer)))
-                if (GUILayout.Button("Import (Multi)"))
+            {
+                if (GUILayout.Button("Import"))
                 {
                     LexiconCsvInterop.ImportMulti(_csvBuffer, _allDocs);
                     Rebuild();
                 }
+            }
             EditorGUILayout.EndHorizontal();
 
             EditorGUILayout.Space(4);
-            _csvBuffer = EditorGUILayout.TextArea(_csvBuffer, GUILayout.Height(PanelHeight - 80));
+            EditorGUILayout.LabelField("Preview", EditorStyles.miniLabel);
+            _csvBuffer = EditorGUILayout.TextArea(_csvBuffer, GUILayout.Height(PanelHeight - 140));
             EditorGUILayout.EndVertical();
         }
 
@@ -454,45 +573,62 @@ namespace Heathen.Lexicon.Editor
                 if (!path.EndsWith(".helex", StringComparison.OrdinalIgnoreCase)) continue;
                 try { _allDocs.Add(ReadHelexDoc(path)); } catch { }
             }
-            _allDocNames = _allDocs.Select(d => d.DisplayName).ToArray();
+
+            // Default doc first
+            _allDocs.Sort((a, b) =>
+            {
+                bool aIsDefault = IsDefaultDoc(a);
+                bool bIsDefault = IsDefaultDoc(b);
+                if (aIsDefault && !bIsDefault) return -1;
+                if (!aIsDefault && bIsDefault) return  1;
+                return string.Compare(a.DisplayName, b.DisplayName, StringComparison.OrdinalIgnoreCase);
+            });
         }
 
         private void Rebuild()
         {
             RefreshDocList();
 
-            // Ensure default exists
             if (_allDocs.Count == 0)
             {
                 GetOrCreateDefault();
                 RefreshDocList();
             }
 
-            // Re-sync references after refresh
-            if (_sourceDoc != null)
-                _sourceDoc = _allDocs.FirstOrDefault(d => d.Path == _sourceDoc.Path);
-            if (_sourceDoc == null && _allDocs.Count > 0)
-                _sourceDoc = _allDocs.First();
+            _defaultDoc = _allDocs.FirstOrDefault(IsDefaultDoc) ?? _allDocs.FirstOrDefault();
 
-            if (_activeDoc != null)
-                _activeDoc = _allDocs.FirstOrDefault(d => d.Path == _activeDoc.Path);
+            // Re-sync extra columns
+            _extraCols = _extraCols
+                .Select(c => _allDocs.FirstOrDefault(d => d.Path == c.Path))
+                .Where(d => d != null && d != _defaultDoc)
+                .ToList();
 
-            _allKeys.Clear();
-            var editTarget = _activeDoc ?? _sourceDoc;
-            if (!_dirty && editTarget != null)
+            RebuildKeyList();
+
+            if (_defaultDoc != null)
             {
                 _editedEntries.Clear();
-                foreach (var e in editTarget.Entries)
+                foreach (var e in _defaultDoc.Entries)
                     if (!string.IsNullOrWhiteSpace(e.Key))
                         _editedEntries[e.Key] = e;
             }
+        }
 
+        private void RebuildKeyList()
+        {
             var union = new HashSet<string>(_editedEntries.Keys);
-            if (_sourceDoc != null)
-                foreach (var e in _sourceDoc.Entries)
+            if (_defaultDoc != null)
+                foreach (var e in _defaultDoc.Entries)
+                    if (!string.IsNullOrWhiteSpace(e.Key)) union.Add(e.Key);
+            foreach (var col in _extraCols)
+                foreach (var e in col.Entries)
                     if (!string.IsNullOrWhiteSpace(e.Key)) union.Add(e.Key);
             _allKeys = union.OrderBy(k => k).ToList();
         }
+
+        private static bool IsDefaultDoc(HelexDocument d)
+            => string.Equals(d.AssetId, "default", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(Path.GetFileNameWithoutExtension(d.Path), "Default", StringComparison.OrdinalIgnoreCase);
 
         private List<string> FilterKeys()
         {
@@ -500,131 +636,166 @@ namespace Heathen.Lexicon.Editor
             return _allKeys.Where(k => k == _selectedPrefix || k.StartsWith(_selectedPrefix + ".")).ToList();
         }
 
-        private LexiconEntryStatus EntryStatus(string key)
+        private string EntryStatusChar(string key)
         {
-            var srcExists = _sourceDoc?.Entries.Any(e => e.Key == key) ?? false;
-            _editedEntries.TryGetValue(key, out var act);
-            var actExists = _editedEntries.ContainsKey(key);
-
-            if (srcExists && !actExists)      return LexiconEntryStatus.Missing;
-            if (!srcExists && actExists)      return LexiconEntryStatus.Orphan;
-            if (actExists && act.IsEmpty)     return LexiconEntryStatus.Empty;
-
-            if (actExists && act.Hint == LexiconHintType.String && !string.IsNullOrEmpty(act.StringValue))
+            if (!_editedEntries.TryGetValue(key, out var e)) return "○";
+            if (e.IsEmpty) return "□";
+            if (e.Hint == LexiconHintType.String && !string.IsNullOrEmpty(e.StringValue))
                 foreach (var kv in _editedEntries)
-                    if (kv.Key != key && kv.Value.Hint == LexiconHintType.String && kv.Value.StringValue == act.StringValue)
-                        return LexiconEntryStatus.Duplicate;
-
-            return LexiconEntryStatus.OK;
+                    if (kv.Key != key && kv.Value.Hint == LexiconHintType.String && kv.Value.StringValue == e.StringValue)
+                        return "▲";
+            return "●";
         }
 
         private void AddKey(string key)
         {
-            if (_allKeys.Contains(key)) return;
+            if (string.IsNullOrWhiteSpace(key) || _allKeys.Contains(key)) return;
             var newEntry = new HelexEntry { Key = key, Hint = LexiconHintType.String };
             _editedEntries[key] = newEntry;
             _allKeys = _allKeys.Append(key).OrderBy(k => k).ToList();
-            _addKeyBuffer = "";
-            PropagateKeyToAll(key);
-            CommitEditedToDoc();
+            // Propagate empty entry to all docs
+            foreach (var doc in _allDocs)
+            {
+                if (doc == _defaultDoc) continue;
+                if (doc.Entries.Any(e => e.Key == key)) continue;
+                doc.Entries.Add(new HelexEntry { Key = key, Hint = LexiconHintType.String });
+                MarkDocPending(doc.Path);
+            }
+            MarkDirty();
         }
 
         private void ChangeHint(HelexEntry entry, LexiconHintType newHint, string key)
         {
             if (newHint == entry.Hint) return;
-            entry.Hint = newHint;
-            if (newHint == LexiconHintType.String) entry.AssetPath = "";
-            else entry.StringValue = "";
+            entry.Hint        = newHint;
+            entry.StringValue = newHint == LexiconHintType.String ? entry.StringValue : "";
+            entry.AssetPath   = newHint == LexiconHintType.String ? "" : entry.AssetPath;
             _editedEntries[key] = entry;
-            _dirty = true;
-            PropagateHintToAll(key, newHint);
-            CommitEditedToDoc();
+            // Propagate hint change to all docs
+            foreach (var doc in _allDocs)
+            {
+                if (doc == _defaultDoc) continue;
+                var idx = doc.Entries.FindIndex(e => e.Key == key);
+                if (idx < 0) continue;
+                var e = doc.Entries[idx];
+                e.Hint        = newHint;
+                e.StringValue = newHint == LexiconHintType.String ? e.StringValue : "";
+                e.AssetPath   = newHint == LexiconHintType.String ? "" : e.AssetPath;
+                doc.Entries[idx] = e;
+                MarkDocPending(doc.Path);
+            }
+            MarkDirty();
         }
 
         private void DeleteKey(string key)
         {
             _editedEntries.Remove(key);
             _allKeys.Remove(key);
-            PropagateDeleteToAll(key);
-            CommitEditedToDoc();
+            foreach (var doc in _allDocs)
+            {
+                var idx = doc.Entries.FindIndex(e => e.Key == key);
+                if (idx >= 0) { doc.Entries.RemoveAt(idx); MarkDocPending(doc.Path); }
+            }
+            MarkDirty();
         }
 
-        // ── Save / flush ──────────────────────────────────────────────────────────
+        // ── Pending writes ────────────────────────────────────────────────────────
 
         private void MarkDirty()
         {
             _dirty = true;
-            if (_savePending) return;
-            _savePending = true;
-            EditorApplication.delayCall += FlushSave;
+            if (_defaultDoc != null) MarkDocPending(_defaultDoc.Path);
         }
 
-        private void FlushSave()
+        private void MarkDocPending(string path)
         {
-            _savePending = false;
-            if (_dirty) CommitEditedToDoc();
+            _pendingWrites.Add(path);
+            if (_writePending) return;
+            _writePending = true;
+            EditorApplication.delayCall += FlushPendingWrites;
         }
 
-        private void CommitEditedToDoc()
+        private void FlushDefaultDoc()
         {
-            var target = _activeDoc ?? _sourceDoc;
-            if (target == null) return;
-            target.Entries.Clear();
+            if (_defaultDoc == null) return;
+            _defaultDoc.Entries.Clear();
             foreach (var kv in _editedEntries.OrderBy(kv => kv.Key))
-                target.Entries.Add(kv.Value);
-            WriteHelexDoc(target);
+                _defaultDoc.Entries.Add(kv.Value);
             _dirty = false;
         }
 
-        // ── Propagation ───────────────────────────────────────────────────────────
-
-        private void PropagateKeyToAll(string key)
+        private void FlushPendingWrites()
         {
-            var editTarget = _activeDoc ?? _sourceDoc;
-            foreach (var doc in _allDocs)
+            _writePending = false;
+            if (_dirty) FlushDefaultDoc();
+
+            foreach (var path in _pendingWrites.ToList())
             {
-                if (doc == editTarget) continue;
-                if (doc.Entries.Any(e => e.Key == key)) continue;
-                doc.Entries.Add(new HelexEntry { Key = key, Hint = LexiconHintType.String });
+                var doc = _allDocs.FirstOrDefault(d => d.Path == path);
+                if (doc == null) continue;
+                if (doc == _defaultDoc)
+                {
+                    doc.Entries.Clear();
+                    foreach (var kv in _editedEntries.OrderBy(kv => kv.Key))
+                        doc.Entries.Add(kv.Value);
+                    _dirty = false;
+                }
                 WriteHelexDoc(doc);
             }
+            _pendingWrites.Clear();
         }
 
-        private void PropagateHintToAll(string key, LexiconHintType newHint)
-        {
-            var editTarget = _activeDoc ?? _sourceDoc;
-            foreach (var doc in _allDocs)
-            {
-                if (doc == editTarget) continue;
-                var idx = doc.Entries.FindIndex(e => e.Key == key);
-                if (idx < 0) continue;
-                var e = doc.Entries[idx];
-                if (newHint == LexiconHintType.String) e.AssetPath   = "";
-                else                                   e.StringValue = "";
-                e.Hint          = newHint;
-                doc.Entries[idx] = e;
-                WriteHelexDoc(doc);
-            }
-        }
+        // ── Culture picker ────────────────────────────────────────────────────────
 
-        private void PropagateDeleteToAll(string key)
+        private void ShowCulturePicker(HelexDocument doc, string filter)
         {
-            var editTarget = _activeDoc ?? _sourceDoc;
-            foreach (var doc in _allDocs)
+            var menu  = new GenericMenu();
+            var f     = filter.Trim();
+            int shown = 0;
+
+            foreach (var (code, name) in KnownCultures.All)
             {
-                if (doc == editTarget) continue;
-                var idx = doc.Entries.FindIndex(e => e.Key == key);
-                if (idx >= 0) { doc.Entries.RemoveAt(idx); WriteHelexDoc(doc); }
+                if (!string.IsNullOrEmpty(f)
+                    && !code.StartsWith(f, StringComparison.OrdinalIgnoreCase)
+                    && !name.Contains(f,  StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (doc.Cultures.Contains(code)) continue;
+
+                var capturedCode = code;
+                menu.AddItem(new GUIContent($"{code}  —  {name}"), false, () =>
+                {
+                    doc.Cultures.Add(capturedCode);
+                    if (_cultureAddBuffers.ContainsKey(doc.Path))
+                        _cultureAddBuffers[doc.Path] = "";
+                    MarkDocPending(doc.Path);
+                });
+                if (++shown >= 50) break;
             }
+
+            if (shown == 0)
+            {
+                if (!string.IsNullOrEmpty(f))
+                    menu.AddItem(new GUIContent($"Add \"{f}\" (custom code)"), false, () =>
+                    {
+                        doc.Cultures.Add(f);
+                        if (_cultureAddBuffers.ContainsKey(doc.Path))
+                            _cultureAddBuffers[doc.Path] = "";
+                        MarkDocPending(doc.Path);
+                    });
+                else
+                    menu.AddDisabledItem(new GUIContent("(all known cultures already added)"));
+            }
+
+            menu.ShowAsContext();
         }
 
         // ── Create new culture document ───────────────────────────────────────────
 
         private void CreateNewCultureDocument()
         {
-            if (_dirty) CommitEditedToDoc();
+            FlushPendingWrites();
             var path = EditorUtility.SaveFilePanelInProject(
-                "New Culture Data", "CultureData", "helex", "Create a new .helex culture file");
+                "New Culture File", "CultureData", "helex", "Create a new .helex culture file");
             if (string.IsNullOrEmpty(path)) return;
 
             var doc = new HelexDocument
@@ -633,13 +804,11 @@ namespace Heathen.Lexicon.Editor
                 AssetId      = Path.GetFileNameWithoutExtension(path),
                 AutoRegister = true,
             };
-            if (_sourceDoc != null)
-                foreach (var e in _sourceDoc.Entries)
+            if (_defaultDoc != null)
+                foreach (var e in _defaultDoc.Entries)
                     doc.Entries.Add(new HelexEntry { Key = e.Key, Hint = e.Hint });
             WriteHelexDoc(doc);
-            _dirty = false;
             Rebuild();
-            _activeDoc = _allDocs.FirstOrDefault(d => d.Path == path);
         }
 
         // ── Public editor API ─────────────────────────────────────────────────────
@@ -658,6 +827,21 @@ namespace Heathen.Lexicon.Editor
             return keys.OrderBy(k => k);
         }
 
+        public static IEnumerable<string> GetAllLexiconKeys(LexiconHintType hint)
+        {
+            var keys  = new HashSet<string>();
+            var guids = AssetDatabase.FindAssets("t:LexiconCompiledData");
+            foreach (var guid in guids)
+            {
+                var data = AssetDatabase.LoadAssetAtPath<LexiconCompiledData>(AssetDatabase.GUIDToAssetPath(guid));
+                if (data?.Entries == null) continue;
+                foreach (var e in data.Entries)
+                    if (!string.IsNullOrWhiteSpace(e.Key) && e.Hint == hint)
+                        keys.Add(e.Key);
+            }
+            return keys.OrderBy(k => k);
+        }
+
         public static void UpsertStringEntry(string key, string stringValue)
         {
             if (string.IsNullOrWhiteSpace(key)) return;
@@ -668,31 +852,20 @@ namespace Heathen.Lexicon.Editor
                 if (!path.EndsWith(".helex", StringComparison.OrdinalIgnoreCase)) continue;
                 try
                 {
-                    var doc     = ReadHelexDoc(path);
-                    var idx     = doc.Entries.FindIndex(e => e.Key == key);
-                    bool isDef  = string.Equals(doc.AssetId, "default", StringComparison.OrdinalIgnoreCase)
-                               || string.Equals(Path.GetFileNameWithoutExtension(path), "Default", StringComparison.OrdinalIgnoreCase);
+                    var doc    = ReadHelexDoc(path);
+                    var idx    = doc.Entries.FindIndex(e => e.Key == key);
+                    bool isDef = string.Equals(doc.AssetId, "default", StringComparison.OrdinalIgnoreCase)
+                              || string.Equals(Path.GetFileNameWithoutExtension(path), "Default", StringComparison.OrdinalIgnoreCase);
                     if (idx >= 0)
-                    {
-                        if (isDef)
-                        { var e = doc.Entries[idx]; e.StringValue = stringValue; doc.Entries[idx] = e; }
-                    }
+                    { if (isDef) { var e = doc.Entries[idx]; e.StringValue = stringValue; doc.Entries[idx] = e; } }
                     else
-                    {
-                        doc.Entries.Add(new HelexEntry
-                        {
-                            Key         = key,
-                            Hint        = LexiconHintType.String,
-                            StringValue = isDef ? stringValue : ""
-                        });
-                    }
+                        doc.Entries.Add(new HelexEntry { Key = key, Hint = LexiconHintType.String, StringValue = isDef ? stringValue : "" });
                     WriteHelexDoc(doc);
                 }
                 catch { }
             }
         }
 
-        // Returns the path of the default .helex file, creating it if absent.
         public static string GetOrCreateDefault()
         {
             var guids = AssetDatabase.FindAssets("t:LexiconCompiledData");
@@ -718,7 +891,7 @@ namespace Heathen.Lexicon.Editor
             return defaultPath;
         }
 
-        // ── .helex I/O (accessible from LexiconGatherer, LexiconCsvInterop) ───────
+        // ── .helex I/O ────────────────────────────────────────────────────────────
 
         internal static HelexDocument ReadHelexDoc(string assetPath)
         {
@@ -739,8 +912,8 @@ namespace Heathen.Lexicon.Editor
                         doc.Entries.Add(new HelexEntry { Key = key, Hint = LexiconHintType.String, StringValue = prop.Value.Value<string>() ?? "" });
                     else if (prop.Value is JObject assetObj)
                     {
-                        var ap   = assetObj["path"]?.Value<string>() ?? "";
-                        var hint = LexiconHintType.Asset;
+                        var ap    = assetObj["path"]?.Value<string>() ?? "";
+                        var hint  = LexiconHintType.Asset;
                         if (!string.IsNullOrEmpty(ap))
                         {
                             var asset = AssetDatabase.LoadAssetAtPath<Object>(ap);
@@ -783,14 +956,6 @@ namespace Heathen.Lexicon.Editor
 
         // ── Helpers ───────────────────────────────────────────────────────────────
 
-        private static LexiconHintType HintFromAsset(Object asset) => asset switch {
-            AudioClip  _ => LexiconHintType.Sound,
-            Texture2D  _ => LexiconHintType.Texture,
-            Sprite     _ => LexiconHintType.Sprite,
-            GameObject _ => LexiconHintType.Prefab,
-            _            => LexiconHintType.Asset,
-        };
-
         private static Type HintToType(LexiconHintType hint) => hint switch {
             LexiconHintType.Sound   => typeof(AudioClip),
             LexiconHintType.Texture => typeof(Texture2D),
@@ -809,54 +974,36 @@ namespace Heathen.Lexicon.Editor
             _                       => "—"
         };
 
-        private static string StatusChar(LexiconEntryStatus s) => s switch {
-            LexiconEntryStatus.Missing   => "○",
-            LexiconEntryStatus.Orphan    => "◆",
-            LexiconEntryStatus.Duplicate => "▲",
-            LexiconEntryStatus.Empty     => "□",
-            _                            => "●"
-        };
+    }
 
-        private static string StatusLabel(LexiconEntryStatus s) => s == LexiconEntryStatus.OK ? "" : s.ToString();
+    // ── Column picker popup ───────────────────────────────────────────────────────
 
-        private static Color StatusColour(LexiconEntryStatus s) => s switch {
-            LexiconEntryStatus.Missing   => new Color(0.9f, 0.5f, 0.5f),
-            LexiconEntryStatus.Orphan    => new Color(0.5f, 0.7f, 1.0f),
-            LexiconEntryStatus.Duplicate => new Color(1.0f, 0.85f, 0.3f),
-            LexiconEntryStatus.Empty     => new Color(0.7f, 0.7f, 0.7f),
-            _                            => Color.white
-        };
+    internal sealed class DocColPicker : PopupWindowContent
+    {
+        private readonly List<HelexDocument> _all;
+        private readonly HelexDocument       _skip;
+        private readonly List<HelexDocument> _selected;
+        private readonly Action              _onChange;
 
-        private static void DrawCulturePicker(string label, string current, string[] options, Action<string> onChanged)
+        public DocColPicker(List<HelexDocument> all, HelexDocument skip, List<HelexDocument> selected, Action onChange)
+        { _all = all; _skip = skip; _selected = selected; _onChange = onChange; }
+
+        public override Vector2 GetWindowSize()
+            => new Vector2(200, Mathf.Min(_all.Count * 22f + 8, 300));
+
+        public override void OnGUI(Rect rect)
         {
-            if (options.Length == 0)
+            foreach (var doc in _all)
             {
-                using (new EditorGUI.DisabledScope(true))
-                    EditorGUILayout.TextField(label, "(none registered)");
-                return;
+                if (doc == _skip) continue;
+                bool on  = _selected.Contains(doc);
+                bool now = EditorGUILayout.ToggleLeft(doc.DisplayName, on);
+                if (now != on) { if (now) _selected.Add(doc); else _selected.Remove(doc); _onChange(); }
             }
-            var idx    = Array.IndexOf(options, current);
-            var newIdx = EditorGUILayout.Popup(label, Mathf.Max(0, idx), options);
-            if (newIdx != idx && newIdx >= 0 && newIdx < options.Length)
-                onChanged(options[newIdx]);
-        }
-
-        private static List<string> CollectCultureCodes()
-        {
-            var codes = new HashSet<string>();
-            var guids = AssetDatabase.FindAssets("t:LexiconCompiledData");
-            foreach (var guid in guids)
-            {
-                var path = AssetDatabase.GUIDToAssetPath(guid);
-                if (!path.EndsWith(".helex", StringComparison.OrdinalIgnoreCase)) continue;
-                try { foreach (var c in ReadHelexDoc(path).Cultures) if (!string.IsNullOrWhiteSpace(c)) codes.Add(c); }
-                catch { }
-            }
-            return new List<string>(codes);
         }
     }
 
-    // ── Shared .helex document model (accessible across the editor assembly) ──────
+    // ── Shared .helex document model ──────────────────────────────────────────────
 
     internal class HelexDocument
     {
@@ -881,5 +1028,196 @@ namespace Heathen.Lexicon.Editor
         public bool IsEmpty => Hint == LexiconHintType.String
             ? string.IsNullOrEmpty(StringValue)
             : string.IsNullOrEmpty(AssetPath);
+    }
+
+    // ── Known BCP 47 culture codes ────────────────────────────────────────────────
+    // Covers base language codes (e.g. "fr") and common regional variants.
+    // Base codes match all sub-cultures at runtime (fr → fr-FR, fr-CA, fr-BE, …).
+    // Regional codes (fr-CA) are matched exactly before falling back to the base.
+
+    internal static class KnownCultures
+    {
+        public static readonly (string Code, string Name)[] All =
+        {
+            // ── Base language codes ──────────────────────────────────────────────
+            ("af",       "Afrikaans"),
+            ("ar",       "Arabic"),
+            ("be",       "Belarusian"),
+            ("bg",       "Bulgarian"),
+            ("bn",       "Bengali"),
+            ("ca",       "Catalan"),
+            ("cs",       "Czech"),
+            ("cy",       "Welsh"),
+            ("da",       "Danish"),
+            ("de",       "German"),
+            ("el",       "Greek"),
+            ("en",       "English"),
+            ("es",       "Spanish"),
+            ("et",       "Estonian"),
+            ("eu",       "Basque"),
+            ("fa",       "Persian"),
+            ("fi",       "Finnish"),
+            ("fr",       "French"),
+            ("ga",       "Irish"),
+            ("gl",       "Galician"),
+            ("he",       "Hebrew"),
+            ("hi",       "Hindi"),
+            ("hr",       "Croatian"),
+            ("hu",       "Hungarian"),
+            ("hy",       "Armenian"),
+            ("id",       "Indonesian"),
+            ("is",       "Icelandic"),
+            ("it",       "Italian"),
+            ("ja",       "Japanese"),
+            ("ka",       "Georgian"),
+            ("kk",       "Kazakh"),
+            ("ko",       "Korean"),
+            ("lt",       "Lithuanian"),
+            ("lv",       "Latvian"),
+            ("mk",       "Macedonian"),
+            ("ms",       "Malay"),
+            ("mt",       "Maltese"),
+            ("nb",       "Norwegian Bokmål"),
+            ("nl",       "Dutch"),
+            ("nn",       "Norwegian Nynorsk"),
+            ("pl",       "Polish"),
+            ("pt",       "Portuguese"),
+            ("ro",       "Romanian"),
+            ("ru",       "Russian"),
+            ("sk",       "Slovak"),
+            ("sl",       "Slovenian"),
+            ("sq",       "Albanian"),
+            ("sr",       "Serbian"),
+            ("sv",       "Swedish"),
+            ("sw",       "Swahili"),
+            ("th",       "Thai"),
+            ("tr",       "Turkish"),
+            ("uk",       "Ukrainian"),
+            ("ur",       "Urdu"),
+            ("uz",       "Uzbek"),
+            ("vi",       "Vietnamese"),
+            ("zh",       "Chinese"),
+            ("zu",       "Zulu"),
+            // ── Arabic variants ──────────────────────────────────────────────────
+            ("ar-AE",    "Arabic (United Arab Emirates)"),
+            ("ar-EG",    "Arabic (Egypt)"),
+            ("ar-SA",    "Arabic (Saudi Arabia)"),
+            // ── Chinese variants ─────────────────────────────────────────────────
+            ("zh-CN",    "Chinese (Simplified, China)"),
+            ("zh-HK",    "Chinese (Traditional, Hong Kong)"),
+            ("zh-MO",    "Chinese (Traditional, Macau)"),
+            ("zh-SG",    "Chinese (Simplified, Singapore)"),
+            ("zh-TW",    "Chinese (Traditional, Taiwan)"),
+            // ── Dutch variants ───────────────────────────────────────────────────
+            ("nl-BE",    "Dutch (Belgium)"),
+            ("nl-NL",    "Dutch (Netherlands)"),
+            // ── English variants ─────────────────────────────────────────────────
+            ("en-AU",    "English (Australia)"),
+            ("en-CA",    "English (Canada)"),
+            ("en-GB",    "English (United Kingdom)"),
+            ("en-IE",    "English (Ireland)"),
+            ("en-IN",    "English (India)"),
+            ("en-NZ",    "English (New Zealand)"),
+            ("en-SG",    "English (Singapore)"),
+            ("en-US",    "English (United States)"),
+            ("en-ZA",    "English (South Africa)"),
+            // ── French variants ──────────────────────────────────────────────────
+            ("fr-BE",    "French (Belgium)"),
+            ("fr-CA",    "French (Canada)"),
+            ("fr-CH",    "French (Switzerland)"),
+            ("fr-FR",    "French (France)"),
+            ("fr-LU",    "French (Luxembourg)"),
+            ("fr-MC",    "French (Monaco)"),
+            // ── German variants ──────────────────────────────────────────────────
+            ("de-AT",    "German (Austria)"),
+            ("de-CH",    "German (Switzerland)"),
+            ("de-DE",    "German (Germany)"),
+            ("de-LI",    "German (Liechtenstein)"),
+            ("de-LU",    "German (Luxembourg)"),
+            // ── Italian variants ─────────────────────────────────────────────────
+            ("it-CH",    "Italian (Switzerland)"),
+            ("it-IT",    "Italian (Italy)"),
+            // ── Portuguese variants ──────────────────────────────────────────────
+            ("pt-BR",    "Portuguese (Brazil)"),
+            ("pt-PT",    "Portuguese (Portugal)"),
+            // ── Russian variants ─────────────────────────────────────────────────
+            ("ru-RU",    "Russian (Russia)"),
+            ("ru-UA",    "Russian (Ukraine)"),
+            // ── Serbian variants ─────────────────────────────────────────────────
+            ("sr-Cyrl",    "Serbian (Cyrillic)"),
+            ("sr-Cyrl-RS", "Serbian (Cyrillic, Serbia)"),
+            ("sr-Latn",    "Serbian (Latin)"),
+            ("sr-Latn-RS", "Serbian (Latin, Serbia)"),
+            // ── Spanish variants ─────────────────────────────────────────────────
+            ("es-AR",    "Spanish (Argentina)"),
+            ("es-BO",    "Spanish (Bolivia)"),
+            ("es-CL",    "Spanish (Chile)"),
+            ("es-CO",    "Spanish (Colombia)"),
+            ("es-CR",    "Spanish (Costa Rica)"),
+            ("es-DO",    "Spanish (Dominican Republic)"),
+            ("es-EC",    "Spanish (Ecuador)"),
+            ("es-ES",    "Spanish (Spain)"),
+            ("es-GT",    "Spanish (Guatemala)"),
+            ("es-HN",    "Spanish (Honduras)"),
+            ("es-MX",    "Spanish (Mexico)"),
+            ("es-NI",    "Spanish (Nicaragua)"),
+            ("es-PA",    "Spanish (Panama)"),
+            ("es-PE",    "Spanish (Peru)"),
+            ("es-PR",    "Spanish (Puerto Rico)"),
+            ("es-PY",    "Spanish (Paraguay)"),
+            ("es-SV",    "Spanish (El Salvador)"),
+            ("es-UY",    "Spanish (Uruguay)"),
+            ("es-VE",    "Spanish (Venezuela)"),
+            // ── Swedish variants ─────────────────────────────────────────────────
+            ("sv-FI",    "Swedish (Finland)"),
+            ("sv-SE",    "Swedish (Sweden)"),
+            // ── Other single-region codes ────────────────────────────────────────
+            ("af-ZA",    "Afrikaans (South Africa)"),
+            ("bs-Cyrl",  "Bosnian (Cyrillic)"),
+            ("bs-Latn",  "Bosnian (Latin)"),
+            ("ca-ES",    "Catalan (Spain)"),
+            ("cs-CZ",    "Czech (Czech Republic)"),
+            ("cy-GB",    "Welsh (United Kingdom)"),
+            ("da-DK",    "Danish (Denmark)"),
+            ("el-GR",    "Greek (Greece)"),
+            ("et-EE",    "Estonian (Estonia)"),
+            ("eu-ES",    "Basque (Spain)"),
+            ("fi-FI",    "Finnish (Finland)"),
+            ("ga-IE",    "Irish (Ireland)"),
+            ("gl-ES",    "Galician (Spain)"),
+            ("he-IL",    "Hebrew (Israel)"),
+            ("hi-IN",    "Hindi (India)"),
+            ("hr-BA",    "Croatian (Bosnia and Herzegovina)"),
+            ("hr-HR",    "Croatian (Croatia)"),
+            ("hu-HU",    "Hungarian (Hungary)"),
+            ("hy-AM",    "Armenian (Armenia)"),
+            ("id-ID",    "Indonesian (Indonesia)"),
+            ("is-IS",    "Icelandic (Iceland)"),
+            ("ja-JP",    "Japanese (Japan)"),
+            ("ka-GE",    "Georgian (Georgia)"),
+            ("kk-KZ",    "Kazakh (Kazakhstan)"),
+            ("ko-KR",    "Korean (Korea)"),
+            ("lt-LT",    "Lithuanian (Lithuania)"),
+            ("lv-LV",    "Latvian (Latvia)"),
+            ("mk-MK",    "Macedonian (North Macedonia)"),
+            ("ms-BN",    "Malay (Brunei)"),
+            ("ms-MY",    "Malay (Malaysia)"),
+            ("mt-MT",    "Maltese (Malta)"),
+            ("nb-NO",    "Norwegian Bokmål (Norway)"),
+            ("nn-NO",    "Norwegian Nynorsk (Norway)"),
+            ("pl-PL",    "Polish (Poland)"),
+            ("ro-RO",    "Romanian (Romania)"),
+            ("sk-SK",    "Slovak (Slovakia)"),
+            ("sl-SI",    "Slovenian (Slovenia)"),
+            ("sq-AL",    "Albanian (Albania)"),
+            ("sw-KE",    "Swahili (Kenya)"),
+            ("th-TH",    "Thai (Thailand)"),
+            ("tr-TR",    "Turkish (Turkey)"),
+            ("uk-UA",    "Ukrainian (Ukraine)"),
+            ("ur-PK",    "Urdu (Pakistan)"),
+            ("uz-Latn",  "Uzbek (Latin)"),
+            ("vi-VN",    "Vietnamese (Vietnam)"),
+            ("zu-ZA",    "Zulu (South Africa)"),
+        };
     }
 }

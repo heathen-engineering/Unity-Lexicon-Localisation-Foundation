@@ -5,7 +5,6 @@ using Object = UnityEngine.Object;
 
 namespace Heathen.Lexicon
 {
-    [CreateAssetMenu(menuName = "Heathen/Lexicon/Culture Data", fileName = "CultureData")]
     public class LexiconData : ScriptableObject
     {
         public string assetId;
