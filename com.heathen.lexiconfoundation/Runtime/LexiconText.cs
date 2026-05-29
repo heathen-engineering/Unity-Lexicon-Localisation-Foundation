@@ -38,5 +38,7 @@ namespace Heathen.Lexicon
                 return LexiconRegistry.ResolveString(GetHash()) ?? _keyOrValue;
             return _keyOrValue;
         }
+
+        public static implicit operator string(LexiconText lt) => lt?.Resolve();
     }
 }

@@ -8,12 +8,18 @@ namespace Heathen.Lexicon.Editor
     [CustomPropertyDrawer(typeof(LexiconAsset))]
     public class LexiconAssetDrawer : PropertyDrawer
     {
-        private const float LineH = 18f;
-        private const float Gap = 2f;
-        private const float RowH = LineH + Gap;
+        private const float ModeButtonW = 36f;
+        private const float HintW      = 58f;
+        private const float Gap        = 2f;
 
-        public override float GetPropertyHeight(SerializedProperty property, GUIContent label) => 2 * RowH;
+        public override float GetPropertyHeight(SerializedProperty property, GUIContent label)
+            => EditorGUIUtility.singleLineHeight;
 
+        // Layout: [Label] [Field/Preview] [Hint] [Mode]
+        //
+        // Hint is a compact enum dropdown so the generic LexiconAsset can still be typed
+        // without needing to open a menu. For typed fields (LexiconSprite etc.) use those
+        // dedicated types instead.
         public override void OnGUI(Rect position, SerializedProperty property, GUIContent label)
         {
             EditorGUI.BeginProperty(position, label, property);
@@ -25,38 +31,40 @@ namespace Heathen.Lexicon.Editor
             var isLocalised = modeProp.enumValueIndex == (int)LexiconLocMode.Localised;
             var hint        = (LexiconHintType)hintProp.enumValueIndex;
 
-            var line = new Rect(position.x, position.y, position.width, LineH);
-            var labelW = EditorGUIUtility.labelWidth;
-            var rightW = line.width - labelW;
-            var halfW  = rightW * 0.5f - 1f;
+            var labelRect = new Rect(position.x, position.y, EditorGUIUtility.labelWidth, position.height);
+            var modeRect  = new Rect(position.xMax - ModeButtonW, position.y, ModeButtonW, position.height);
+            var hintRect  = new Rect(position.xMax - ModeButtonW - HintW - Gap, position.y, HintW, position.height);
+            var fieldRect = new Rect(position.x + EditorGUIUtility.labelWidth, position.y,
+                                     position.width - EditorGUIUtility.labelWidth - HintW - ModeButtonW - Gap * 2, position.height);
 
-            // Row 1: label + mode + hint
-            EditorGUI.LabelField(new Rect(line.x, line.y, labelW, line.height), label);
-            EditorGUI.PropertyField(new Rect(line.x + labelW, line.y, halfW, line.height), modeProp, GUIContent.none);
-            EditorGUI.PropertyField(new Rect(line.x + labelW + halfW + 2f, line.y, halfW, line.height), hintProp, GUIContent.none);
-            line.y += RowH;
+            EditorGUI.LabelField(labelRect, label);
 
             if (isLocalised)
             {
-                // Row 2: read-only key + Pick button (filtered by hint)
-                const float pickW = 50f;
-                var prevEnabled = GUI.enabled;
-                GUI.enabled = false;
-                EditorGUI.PropertyField(new Rect(line.x, line.y, line.width - pickW - 2f, line.height),
-                    keyProp, new GUIContent("Key"));
-                GUI.enabled = prevEnabled;
-                if (GUI.Button(new Rect(line.x + line.width - pickW, line.y, pickW, line.height), "Pick"))
-                    ShowKeyPicker(keyProp, hint);
+                var key = keyProp.stringValue;
+                var preview = string.IsNullOrEmpty(key) ? "(no key selected)" : key;
+                using (new EditorGUI.DisabledScope(true))
+                    EditorGUI.TextField(fieldRect, preview);
             }
             else
             {
-                // Row 2: typed asset field
                 EditorGUI.BeginChangeCheck();
-                var obj = EditorGUI.ObjectField(line, new GUIContent("Asset"),
-                    literalProp.objectReferenceValue, HintToType(hint), false);
+                var obj = EditorGUI.ObjectField(fieldRect, literalProp.objectReferenceValue, HintToType(hint), false);
                 if (EditorGUI.EndChangeCheck())
                     literalProp.objectReferenceValue = obj;
             }
+
+            EditorGUI.PropertyField(hintRect, hintProp, GUIContent.none);
+
+            var modeLabel = modeProp.enumValueIndex switch
+            {
+                (int)LexiconLocMode.Localised => "Loc",
+                (int)LexiconLocMode.Invariant => "Inv",
+                _                             => "Lit",
+            };
+
+            if (GUI.Button(modeRect, modeLabel))
+                LexiconAssetMenuHelper.ShowMenu(modeProp, keyProp, hint);
 
             EditorGUI.EndProperty();
         }
@@ -69,26 +77,5 @@ namespace Heathen.Lexicon.Editor
             LexiconHintType.Prefab  => typeof(GameObject),
             _                       => typeof(Object),
         };
-
-        private static void ShowKeyPicker(SerializedProperty keyProp, LexiconHintType hint)
-        {
-            var menu  = new GenericMenu();
-            var keys  = hint == LexiconHintType.None
-                ? LexiconSettingsProvider.GetAllLexiconKeys()
-                : LexiconSettingsProvider.GetAllLexiconKeys(hint);
-            int count = 0;
-            foreach (var k in keys)
-            {
-                count++;
-                menu.AddItem(new GUIContent(k.Replace('.', '/')), keyProp.stringValue == k, () =>
-                {
-                    keyProp.stringValue = k;
-                    keyProp.serializedObject.ApplyModifiedProperties();
-                });
-            }
-            if (count == 0)
-                menu.AddDisabledItem(new GUIContent("(no matching keys found)"));
-            menu.ShowAsContext();
-        }
     }
 }

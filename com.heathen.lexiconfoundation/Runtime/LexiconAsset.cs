@@ -46,5 +46,7 @@ namespace Heathen.Lexicon
                 return LexiconRegistry.ResolveAsset(GetHash()) ?? _literalAsset;
             return _literalAsset;
         }
+
+        public static implicit operator Object(LexiconAsset la) => la?.Resolve();
     }
 }

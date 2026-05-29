@@ -44,5 +44,7 @@ namespace Heathen.Lexicon
                 return LexiconRegistry.ResolveSound(GetHash()) ?? _literalClip;
             return _literalClip;
         }
+
+        public static implicit operator AudioClip(LexiconSound ls) => ls?.Resolve();
     }
 }

@@ -833,11 +833,15 @@ namespace Heathen.Lexicon.Editor
             var guids = AssetDatabase.FindAssets("t:LexiconCompiledData");
             foreach (var guid in guids)
             {
-                var data = AssetDatabase.LoadAssetAtPath<LexiconCompiledData>(AssetDatabase.GUIDToAssetPath(guid));
-                if (data?.Entries == null) continue;
-                foreach (var e in data.Entries)
-                    if (!string.IsNullOrWhiteSpace(e.Key) && e.Hint == hint)
-                        keys.Add(e.Key);
+                var path = AssetDatabase.GUIDToAssetPath(guid);
+                if (!path.EndsWith(".helex", StringComparison.OrdinalIgnoreCase)) continue;
+                try
+                {
+                    foreach (var e in ReadHelexDoc(path).Entries)
+                        if (!string.IsNullOrWhiteSpace(e.Key) && e.Hint == hint)
+                            keys.Add(e.Key);
+                }
+                catch { }
             }
             return keys.OrderBy(k => k);
         }
@@ -912,9 +916,14 @@ namespace Heathen.Lexicon.Editor
                         doc.Entries.Add(new HelexEntry { Key = key, Hint = LexiconHintType.String, StringValue = prop.Value.Value<string>() ?? "" });
                     else if (prop.Value is JObject assetObj)
                     {
-                        var ap    = assetObj["path"]?.Value<string>() ?? "";
-                        var hint  = LexiconHintType.Asset;
-                        if (!string.IsNullOrEmpty(ap))
+                        var ap       = assetObj["path"]?.Value<string>() ?? "";
+                        var hintStr  = assetObj["hint"]?.Value<string>();
+                        LexiconHintType hint;
+
+                        // Prefer the explicit stored hint, then detect from the loaded asset.
+                        if (!string.IsNullOrEmpty(hintStr) && Enum.TryParse(hintStr, out LexiconHintType parsedHint))
+                            hint = parsedHint;
+                        else if (!string.IsNullOrEmpty(ap))
                         {
                             var asset = AssetDatabase.LoadAssetAtPath<Object>(ap);
                             hint = asset switch {
@@ -925,6 +934,9 @@ namespace Heathen.Lexicon.Editor
                                 _            => LexiconHintType.Asset,
                             };
                         }
+                        else
+                            hint = LexiconHintType.Asset;
+
                         doc.Entries.Add(new HelexEntry { Key = key, Hint = hint, AssetPath = ap });
                     }
                 }
@@ -940,7 +952,11 @@ namespace Heathen.Lexicon.Editor
                 if (e.Hint == LexiconHintType.String || e.Hint == LexiconHintType.None)
                     entries[e.Key] = e.StringValue ?? "";
                 else
-                    entries[e.Key] = new JObject { ["path"] = e.AssetPath ?? "" };
+                    entries[e.Key] = new JObject
+                    {
+                        ["hint"] = e.Hint.ToString(),
+                        ["path"] = e.AssetPath ?? ""
+                    };
             }
             var root = new JObject
             {
