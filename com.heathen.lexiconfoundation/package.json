@@ -1,7 +1,7 @@
 {
     "name": "com.heathen.lexiconfoundation",
     "displayName": "Lexicon Localisation Foundation",
-    "version": "1.0.9",
+    "version": "1.0.10",
     "unity": "6000.0",
     "author": {
         "name": "Heathen Group",
@@ -16,7 +16,6 @@
         "heathen"
     ],
     "dependencies": {
-        "com.heathen.gameplaytags": "1.0.0",
         "com.unity.collections": "2.6.2",
         "com.unity.mathematics": "1.2.5",
         "com.unity.nuget.newtonsoft-json": "3.2.1"
