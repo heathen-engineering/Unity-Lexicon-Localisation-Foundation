@@ -5,6 +5,11 @@ using Object = UnityEngine.Object;
 
 namespace Heathen.Lexicon.Editor
 {
+    /// <summary>
+    /// Custom property drawer for <see cref="LexiconAsset"/> fields. Renders a single-line layout
+    /// containing a label, an object field or read-only key preview, a compact hint type dropdown,
+    /// and a mode toggle button that opens the key picker context menu.
+    /// </summary>
     [CustomPropertyDrawer(typeof(LexiconAsset))]
     public class LexiconAssetDrawer : PropertyDrawer
     {
@@ -12,14 +17,24 @@ namespace Heathen.Lexicon.Editor
         private const float HintW      = 58f;
         private const float Gap        = 2f;
 
+        /// <summary>
+        /// Returns the height required to draw this property, which is always a single line.
+        /// </summary>
+        /// <param name="property">The serialised property being drawn.</param>
+        /// <param name="label">The label associated with the property.</param>
+        /// <returns>The height in pixels of a single Editor line.</returns>
         public override float GetPropertyHeight(SerializedProperty property, GUIContent label)
             => EditorGUIUtility.singleLineHeight;
 
-        // Layout: [Label] [Field/Preview] [Hint] [Mode]
-        //
-        // Hint is a compact enum dropdown so the generic LexiconAsset can still be typed
-        // without needing to open a menu. For typed fields (LexiconSprite etc.) use those
-        // dedicated types instead.
+        /// <summary>
+        /// Draws the <see cref="LexiconAsset"/> field in the Inspector.
+        /// Layout: [Label] [Field/Preview] [Hint] [Mode]
+        /// When localised, the field area shows a read-only key preview.
+        /// When literal or invariant, it shows an object picker filtered by the current hint type.
+        /// </summary>
+        /// <param name="position">The screen rectangle allocated for this property.</param>
+        /// <param name="property">The serialised property being drawn.</param>
+        /// <param name="label">The label to display for this property.</param>
         public override void OnGUI(Rect position, SerializedProperty property, GUIContent label)
         {
             EditorGUI.BeginProperty(position, label, property);

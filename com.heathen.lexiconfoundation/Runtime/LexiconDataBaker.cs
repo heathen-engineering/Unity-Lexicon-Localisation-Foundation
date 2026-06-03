@@ -6,13 +6,31 @@ using UnityEngine;
 
 namespace Heathen.Lexicon
 {
+    /// <summary>
+    /// An authoring <see cref="MonoBehaviour"/> that holds a reference to a <see cref="LexiconData"/>
+    /// asset for baking into the ECS world. Attach this component to a GameObject in a subscene and
+    /// assign the desired <see cref="LexiconData"/> asset to convert its string entries into a
+    /// <see cref="LexiconStringBlobComponent"/> at bake time.
+    /// </summary>
     public class LexiconDataAuthoring : MonoBehaviour
     {
+        /// <summary>The <see cref="LexiconData"/> asset whose string entries will be baked into a blob asset.</summary>
         public LexiconData Data;
     }
 
+    /// <summary>
+    /// ECS baker that converts a <see cref="LexiconDataAuthoring"/> component into a
+    /// <see cref="LexiconStringBlobComponent"/> containing a sorted blob array of all string entries.
+    /// Asset entries are excluded because <see cref="UnityEngine.Object"/> references cannot live in Burst or ECS.
+    /// </summary>
     public class LexiconDataBaker : Baker<LexiconDataAuthoring>
     {
+        /// <summary>
+        /// Bakes the string entries from <see cref="LexiconDataAuthoring.Data"/> into a
+        /// <see cref="LexiconStringBlobComponent"/> attached to the baked entity. Entries are sorted
+        /// by hash to enable O(log n) binary search from Burst systems.
+        /// </summary>
+        /// <param name="authoring">The authoring component supplying the <see cref="LexiconData"/> to bake.</param>
         public override void Bake(LexiconDataAuthoring authoring)
         {
             if (authoring.Data == null) return;

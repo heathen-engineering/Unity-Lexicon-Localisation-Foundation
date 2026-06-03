@@ -6,6 +6,15 @@ namespace Heathen.Lexicon.Editor
     // Shared context-menu logic for all single-line Lexicon asset property drawers.
     internal static class LexiconAssetMenuHelper
     {
+        /// <summary>
+        /// Displays a context menu that lets the user switch the localisation mode of a Lexicon
+        /// asset field and pick a key from all registered <c>.helex</c> files filtered by
+        /// <paramref name="hint"/>. Selecting a key automatically switches the field to
+        /// <see cref="LexiconLocMode.Localised"/> and stores the chosen key.
+        /// </summary>
+        /// <param name="modeProp">The serialised <c>Mode</c> property of the Lexicon field.</param>
+        /// <param name="keyProp">The serialised key property of the Lexicon field.</param>
+        /// <param name="hint">The entry type used to filter the available keys shown in the menu.</param>
         internal static void ShowMenu(SerializedProperty modeProp, SerializedProperty keyProp, LexiconHintType hint)
         {
             var menu      = new GenericMenu();

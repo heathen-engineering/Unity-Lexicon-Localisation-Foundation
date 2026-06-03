@@ -6,6 +6,11 @@ using Object = UnityEngine.Object;
 
 namespace Heathen.Lexicon
 {
+    /// <summary>
+    /// The central runtime registry for all Lexicon localisation data.
+    /// Maintains a per-culture dictionary of entries sourced from <see cref="LexiconData"/> and
+    /// <see cref="LexiconCompiledData"/> assets, and resolves strings and assets for the active culture.
+    /// </summary>
     public static class LexiconRegistry
     {
         private static readonly List<LexiconData>         _registeredData         = new();
@@ -18,7 +23,16 @@ namespace Heathen.Lexicon
         private static LexiconData         _defaultData;
         private static LexiconCompiledData _defaultCompiledData;
 
+        /// <summary>
+        /// Raised whenever the active culture changes via <see cref="UseCulture"/>.
+        /// Subscribe to this event to refresh any UI or cached values that depend on the current culture.
+        /// </summary>
         public static event Action<string> CultureChanged;
+
+        /// <summary>
+        /// Raised whenever the default culture is first established during registration.
+        /// Useful for systems that need to know when a fallback culture becomes available.
+        /// </summary>
         public static event Action<string> DefaultCultureChanged;
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
@@ -53,6 +67,11 @@ namespace Heathen.Lexicon
                 _activeCulture = systemCulture;
         }
 
+        /// <summary>
+        /// Registers a <see cref="LexiconData"/> asset with the registry, indexing all its entries
+        /// under each of its declared cultures. Skips registration if the asset is already registered.
+        /// </summary>
+        /// <param name="data">The <see cref="LexiconData"/> asset to register.</param>
         public static void Register(LexiconData data)
         {
             if (data == null || _registeredData.Contains(data)) return;
@@ -68,6 +87,11 @@ namespace Heathen.Lexicon
                 _activeCulture = data.cultures[0];
         }
 
+        /// <summary>
+        /// Registers a <see cref="LexiconCompiledData"/> asset with the registry, indexing all its
+        /// pre-hashed entries under each of its declared cultures. Skips registration if already registered.
+        /// </summary>
+        /// <param name="data">The <see cref="LexiconCompiledData"/> asset to register.</param>
         public static void Register(LexiconCompiledData data)
         {
             if (data == null || _registeredCompiledData.Contains(data)) return;
@@ -78,40 +102,78 @@ namespace Heathen.Lexicon
                 _defaultCompiledData = data;
         }
 
+        /// <summary>
+        /// Returns <see langword="true"/> when the given <see cref="LexiconCompiledData"/> asset
+        /// is the designated fallback, identified by its name or <see cref="LexiconCompiledData.AssetId"/>
+        /// equalling <c>"default"</c> (case-insensitive).
+        /// </summary>
+        /// <param name="data">The compiled data asset to test.</param>
+        /// <returns><see langword="true"/> if the asset is the default fallback; otherwise <see langword="false"/>.</returns>
         public static bool IsDefaultCompiledAsset(LexiconCompiledData data) =>
             data != null &&
             (string.Equals(data.name,    "Default", StringComparison.OrdinalIgnoreCase) ||
              string.Equals(data.AssetId, "default", StringComparison.OrdinalIgnoreCase));
 
+        /// <summary>
+        /// Returns <see langword="true"/> when the given <see cref="LexiconData"/> asset
+        /// is the designated fallback, identified by its name or <see cref="LexiconData.assetId"/>
+        /// equalling <c>"default"</c> (case-insensitive).
+        /// </summary>
+        /// <param name="data">The legacy data asset to test.</param>
+        /// <returns><see langword="true"/> if the asset is the default fallback; otherwise <see langword="false"/>.</returns>
         public static bool IsDefaultAsset(LexiconData data) =>
             data != null &&
             (string.Equals(data.name,    "Default", StringComparison.OrdinalIgnoreCase) ||
              string.Equals(data.assetId, "default", StringComparison.OrdinalIgnoreCase));
 
+        /// <summary>
+        /// Removes a <see cref="LexiconData"/> asset from the registry and rebuilds all culture tables.
+        /// </summary>
+        /// <param name="data">The <see cref="LexiconData"/> asset to remove.</param>
         public static void Unregister(LexiconData data)
         {
             if (!_registeredData.Remove(data)) return;
             RebuildAllCultures();
         }
 
-        // Primary game-dev API: call this from a language settings menu or on startup.
-        // Finds the helex that serves cultureCode (exact, then base-language prefix),
-        // falling back to the Default helex if nothing matches.
+        /// <summary>
+        /// Sets the active culture and raises <see cref="CultureChanged"/>. This is the primary
+        /// game-developer API for switching language at runtime, such as from a settings menu.
+        /// Resolution falls back through the base language, then the default culture, then the
+        /// Default asset when no exact match is found.
+        /// </summary>
+        /// <param name="cultureCode">The BCP 47 culture code to activate (e.g. <c>"fr-CA"</c>).</param>
         public static void UseCulture(string cultureCode)
         {
             _activeCulture = cultureCode;
             CultureChanged?.Invoke(cultureCode);
         }
 
-        // Backwards-compatible alias.
+        /// <summary>
+        /// Backwards-compatible alias for <see cref="UseCulture"/>. Prefer <see cref="UseCulture"/> in new code.
+        /// </summary>
+        /// <param name="cultureCode">The BCP 47 culture code to activate.</param>
         public static void LoadCulture(string cultureCode) => UseCulture(cultureCode);
 
+        /// <summary>
+        /// Returns the BCP 47 code of the currently active culture, or <see langword="null"/>
+        /// if no culture has been set or detected yet.
+        /// </summary>
+        /// <returns>The active culture code, or <see langword="null"/>.</returns>
         public static string GetActiveCulture() => _activeCulture;
 
-        // Returns the culture codes that have at least one helex mapped to them —
-        // useful for populating a language-selection menu.
+        /// <summary>
+        /// Returns all culture codes that have at least one registered asset mapped to them.
+        /// Use this to populate a language-selection menu in your game's settings UI.
+        /// </summary>
+        /// <returns>An enumerable of BCP 47 culture code strings.</returns>
         public static IEnumerable<string> GetMappedCultureCodes() => _cultures.Keys;
 
+        /// <summary>
+        /// Returns the asset IDs of all currently registered <see cref="LexiconData"/> assets
+        /// that have a non-empty <see cref="LexiconData.assetId"/>.
+        /// </summary>
+        /// <returns>An enumerable of asset ID strings.</returns>
         public static IEnumerable<string> GetAvailableAssetIds()
         {
             foreach (var data in _registeredData)
@@ -119,10 +181,22 @@ namespace Heathen.Lexicon
                     yield return data.assetId;
         }
 
-        // Resolves "Language.{assetId}" in active then default culture; returns assetId as fallback.
+        /// <summary>
+        /// Returns the localised display name for a culture asset by resolving the key
+        /// <c>Language.{assetId}</c> in the active culture. Falls back to <paramref name="assetId"/>
+        /// itself when no entry is found.
+        /// </summary>
+        /// <param name="assetId">The asset ID whose display name to look up.</param>
+        /// <returns>The localised display name, or <paramref name="assetId"/> if none is registered.</returns>
         public static string GetDisplayName(string assetId) =>
             ResolveString($"Language.{assetId}") ?? assetId;
 
+        /// <summary>
+        /// Resolves a string entry for the given pre-computed hash in the active culture,
+        /// following the fallback chain: exact culture, base language, default culture, Default asset.
+        /// </summary>
+        /// <param name="key">The XXH3 hash of the dot-path key.</param>
+        /// <returns>The resolved string, or <see langword="null"/> if no matching entry is found.</returns>
         public static string ResolveString(ulong key)
         {
             if (TryGetEntry(key, out var entry) && entry.hint == LexiconHintType.String)
@@ -130,8 +204,19 @@ namespace Heathen.Lexicon
             return null;
         }
 
+        /// <summary>
+        /// Resolves a string entry for the given dot-path key in the active culture.
+        /// Hashes the key and delegates to <see cref="ResolveString(ulong)"/>.
+        /// </summary>
+        /// <param name="dotPath">The dot-path key string (e.g. <c>"UI.Play"</c>).</param>
+        /// <returns>The resolved string, or <see langword="null"/> if no matching entry is found.</returns>
         public static string ResolveString(string dotPath) => ResolveString(Hash(dotPath));
 
+        /// <summary>
+        /// Resolves an asset entry for the given pre-computed hash in the active culture.
+        /// </summary>
+        /// <param name="key">The XXH3 hash of the dot-path key.</param>
+        /// <returns>The resolved <see cref="UnityEngine.Object"/>, or <see langword="null"/> if not found.</returns>
         public static Object ResolveAsset(ulong key)
         {
             if (TryGetEntry(key, out var entry))
@@ -139,17 +224,44 @@ namespace Heathen.Lexicon
             return null;
         }
 
+        /// <summary>
+        /// Resolves an asset entry for the given dot-path key in the active culture.
+        /// </summary>
+        /// <param name="dotPath">The dot-path key string.</param>
+        /// <returns>The resolved <see cref="UnityEngine.Object"/>, or <see langword="null"/> if not found.</returns>
         public static Object ResolveAsset(string dotPath) => ResolveAsset(Hash(dotPath));
 
+        /// <summary>
+        /// Resolves a sound entry for the given pre-computed hash as an <see cref="AudioClip"/>.
+        /// </summary>
+        /// <param name="key">The XXH3 hash of the dot-path key.</param>
+        /// <returns>The resolved <see cref="AudioClip"/>, or <see langword="null"/> if not found or not an AudioClip.</returns>
         public static AudioClip ResolveSound(ulong key) => ResolveAsset(key) as AudioClip;
 
+        /// <summary>
+        /// Resolves a sound entry for the given dot-path key as an <see cref="AudioClip"/>.
+        /// </summary>
+        /// <param name="dotPath">The dot-path key string.</param>
+        /// <returns>The resolved <see cref="AudioClip"/>, or <see langword="null"/> if not found or not an AudioClip.</returns>
         public static AudioClip ResolveSound(string dotPath) => ResolveSound(Hash(dotPath));
 
+        /// <summary>
+        /// Computes the XXH3 (seed 0) hash of the given text, using the same algorithm as O3DE
+        /// Lexicon Foundation to ensure cross-engine hash compatibility.
+        /// </summary>
+        /// <param name="text">The string to hash.</param>
+        /// <returns>The 64-bit XXH3 hash of <paramref name="text"/>.</returns>
         public static ulong Hash(string text) => GameplayTags.GameplayTag.HashPath(text);
 
-        // Burst-readable snapshot of all string entries in the active culture.
-        // Asset entries are excluded — UnityEngine.Object refs cannot be accessed from Burst.
-        // Caller owns and must Dispose. Rebuild on CultureChanged.
+        /// <summary>
+        /// Creates a Burst-readable snapshot of all string entries in the active culture as a
+        /// <see cref="NativeHashMap{TKey,TValue}"/>. Asset entries are excluded because
+        /// <see cref="UnityEngine.Object"/> references cannot be accessed from Burst.
+        /// The caller owns the returned map and must call <c>Dispose</c> when finished.
+        /// Rebuild the snapshot whenever <see cref="CultureChanged"/> fires.
+        /// </summary>
+        /// <param name="allocator">The allocator to use for the native map.</param>
+        /// <returns>A <see cref="NativeHashMap{TKey,TValue}"/> mapping entry hashes to fixed-length string values.</returns>
         public static NativeHashMap<ulong, FixedString512Bytes> GetStringSnapshot(Allocator allocator)
         {
             var result = new NativeHashMap<ulong, FixedString512Bytes>(64, allocator);
@@ -166,7 +278,16 @@ namespace Heathen.Lexicon
             return result;
         }
 
-        // Inject or overwrite a string entry without a LexiconData asset. Uses active culture when cultureCode is null.
+        /// <summary>
+        /// Injects or overwrites a string entry in the registry without requiring a
+        /// <see cref="LexiconData"/> asset. Uses the active culture when <paramref name="cultureCode"/>
+        /// is <see langword="null"/>.
+        /// </summary>
+        /// <param name="dotPath">The dot-path key for the entry (e.g. <c>"UI.Play"</c>).</param>
+        /// <param name="value">The string value to store.</param>
+        /// <param name="cultureCode">
+        /// The BCP 47 culture code to write into, or <see langword="null"/> to target the active culture.
+        /// </param>
         public static void SetString(string dotPath, string value, string cultureCode = null)
         {
             if (string.IsNullOrWhiteSpace(dotPath)) return;
@@ -175,7 +296,16 @@ namespace Heathen.Lexicon
             dict[key] = new LexiconData.Entry { key = dotPath, hint = LexiconHintType.String, stringValue = value };
         }
 
-        // Inject or overwrite an asset entry without a LexiconData asset. Uses active culture when cultureCode is null.
+        /// <summary>
+        /// Injects or overwrites an asset entry in the registry without requiring a
+        /// <see cref="LexiconData"/> asset. The hint is inferred from the asset type.
+        /// Uses the active culture when <paramref name="cultureCode"/> is <see langword="null"/>.
+        /// </summary>
+        /// <param name="dotPath">The dot-path key for the entry.</param>
+        /// <param name="asset">The <see cref="UnityEngine.Object"/> asset to store.</param>
+        /// <param name="cultureCode">
+        /// The BCP 47 culture code to write into, or <see langword="null"/> to target the active culture.
+        /// </param>
         public static void SetAsset(string dotPath, Object asset, string cultureCode = null)
         {
             if (string.IsNullOrWhiteSpace(dotPath)) return;
@@ -192,7 +322,14 @@ namespace Heathen.Lexicon
             dict[key] = new LexiconData.Entry { key = dotPath, hint = hint, assetValue = asset };
         }
 
-        // Remove a runtime-injected entry. Pass null to remove from all cultures.
+        /// <summary>
+        /// Removes a runtime-injected entry from the registry. Pass <see langword="null"/> for
+        /// <paramref name="cultureCode"/> to remove the entry from every culture simultaneously.
+        /// </summary>
+        /// <param name="dotPath">The dot-path key of the entry to remove.</param>
+        /// <param name="cultureCode">
+        /// The specific culture to remove the entry from, or <see langword="null"/> to remove from all cultures.
+        /// </param>
         public static void RemoveKey(string dotPath, string cultureCode = null)
         {
             if (string.IsNullOrWhiteSpace(dotPath)) return;
