@@ -57,6 +57,16 @@ namespace Heathen.Lexicon.Editor
             if (string.IsNullOrWhiteSpace(compiled.AssetId))
                 compiled.AssetId = Path.GetFileNameWithoutExtension(ctx.assetPath);
 
+            // The Default asset is the culture-neutral fallback and may declare no cultures; every other
+            // .helex must list at least one, otherwise its entries would be unreachable at runtime.
+            var fileName  = Path.GetFileNameWithoutExtension(ctx.assetPath);
+            bool isDefault = string.Equals(fileName, "Default", StringComparison.OrdinalIgnoreCase)
+                          || string.Equals(compiled.AssetId, "default", StringComparison.OrdinalIgnoreCase);
+            if (!isDefault && (compiled.Cultures == null || compiled.Cultures.Length == 0))
+                ctx.LogImportError(
+                    $"[Lexicon] '{fileName}.helex' declares no cultures. Every .helex except Default must " +
+                    "list at least one culture code, otherwise its entries can never be resolved.");
+
             ctx.AddObjectToAsset("main", compiled);
             ctx.SetMainObject(compiled);
 
@@ -67,10 +77,18 @@ namespace Heathen.Lexicon.Editor
         private static CompiledLexiconEntry[] ParseEntries(JObject entries, AssetImportContext ctx)
         {
             var result = new List<CompiledLexiconEntry>();
+            var seen   = new HashSet<ulong>();
             foreach (var prop in entries.Properties())
             {
                 var key = prop.Name.Trim();
                 if (string.IsNullOrWhiteSpace(key)) continue;
+
+                // The compiled set must not contain duplicate keys — they would collide in the registry.
+                if (!seen.Add(LexiconRegistry.Hash(key)))
+                {
+                    ctx.LogImportError($"Duplicate key '{key}' — keys must be unique within a .helex file.");
+                    continue;
+                }
 
                 if (prop.Value.Type == JTokenType.String)
                 {

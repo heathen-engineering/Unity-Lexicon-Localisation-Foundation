@@ -65,5 +65,25 @@ namespace Heathen.Lexicon
         /// The compiled entries read from the <c>.helex</c> source, with keys pre-hashed at import time.
         /// </summary>
         public CompiledLexiconEntry[] Entries;
+
+        private void OnEnable()
+        {
+#if !UNITY_EDITOR
+            // Self-register whenever the asset loads at runtime — including PlayerSettings-preloaded assets
+            // (such as the Default) that may load after the registry's subsystem-registration pass.
+            // Editor-time registration is handled by LexiconCompiledDataRefresh.
+            if (AutoRegister)
+                LexiconRegistry.Register(this);
+#endif
+        }
+
+        private void OnDisable()
+        {
+#if !UNITY_EDITOR
+            // The registry refuses to unregister the Default, so this only releases optional language packs.
+            if (AutoRegister)
+                LexiconRegistry.Unregister(this);
+#endif
+        }
     }
 }

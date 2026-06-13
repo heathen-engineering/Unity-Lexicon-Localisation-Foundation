@@ -86,8 +86,9 @@ namespace Heathen.Lexicon
 
         /// <summary>
         /// Validates the entries in this asset and returns a list of human-readable error messages.
-        /// Checks for empty keys, duplicate keys, empty string values, duplicate string values,
-        /// and null asset references.
+        /// Checks for empty keys, duplicate keys, empty string values, and null asset references.
+        /// Distinct keys sharing the same string value is legitimate (e.g. many keys resolving to "OK")
+        /// and is not reported.
         /// </summary>
         /// <returns>
         /// A list of error message strings describing each validation problem found.
@@ -97,7 +98,6 @@ namespace Heathen.Lexicon
         {
             var errors = new List<string>();
             var seenKeys = new HashSet<string>();
-            var seenStringValues = new Dictionary<string, string>();
 
             foreach (var entry in entries)
             {
@@ -117,10 +117,6 @@ namespace Heathen.Lexicon
                 {
                     if (string.IsNullOrEmpty(entry.stringValue))
                         errors.Add($"Empty string value for key: {entry.key}");
-                    else if (seenStringValues.TryGetValue(entry.stringValue, out var other))
-                        errors.Add($"Duplicate value for keys '{entry.key}' and '{other}'");
-                    else
-                        seenStringValues[entry.stringValue] = entry.key;
                 }
                 else if (entry.assetValue == null)
                 {

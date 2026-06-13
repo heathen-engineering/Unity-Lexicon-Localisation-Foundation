@@ -52,12 +52,8 @@ namespace Heathen.Lexicon
             var arr = builder.Allocate(ref blob.Entries, pairs.Count);
             for (int i = 0; i < pairs.Count; i++)
             {
-                arr[i].Hash = pairs[i].hash;
-                var bytes = System.Text.Encoding.UTF8.GetBytes(pairs[i].value);
-                var s = bytes.Length > 510
-                    ? System.Text.Encoding.UTF8.GetString(bytes, 0, 510)
-                    : pairs[i].value;
-                arr[i].Value = new FixedString512Bytes(s);
+                arr[i].Hash  = pairs[i].hash;
+                arr[i].Value = new FixedString512Bytes(LexiconRegistry.TruncateUtf8(pairs[i].value, 510));
             }
 
             var blobRef = builder.CreateBlobAssetReference<LexiconStringBlob>(Allocator.Persistent);
