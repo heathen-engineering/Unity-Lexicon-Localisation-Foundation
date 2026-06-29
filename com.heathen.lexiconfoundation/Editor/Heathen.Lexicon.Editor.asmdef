@@ -2,7 +2,10 @@
     "name": "Heathen.Lexicon.Editor",
     "rootNamespace": "",
     "references": [
-        "Heathen.Lexicon"
+        "Heathen.Lexicon",
+        "Unity.Addressables",
+        "Unity.Addressables.Editor",
+        "Unity.ResourceManager"
     ],
     "includePlatforms": [
         "Editor"

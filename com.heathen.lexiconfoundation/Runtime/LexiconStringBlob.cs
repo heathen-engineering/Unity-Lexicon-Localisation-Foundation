@@ -25,7 +25,7 @@ namespace Heathen.Lexicon
     public struct LexiconStringBlob
     {
         /// <summary>
-        /// The sorted array of string entries baked from a <see cref="LexiconData"/> asset.
+        /// The sorted array of string entries baked from a <see cref="LexiconCompiledData"/> asset.
         /// Access this via binary search on <see cref="LexiconStringEntry.Hash"/> from Burst systems.
         /// </summary>
         public BlobArray<LexiconStringEntry> Entries;

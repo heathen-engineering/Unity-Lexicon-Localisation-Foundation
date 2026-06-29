@@ -7,15 +7,15 @@ using UnityEngine;
 namespace Heathen.Lexicon
 {
     /// <summary>
-    /// An authoring <see cref="MonoBehaviour"/> that holds a reference to a <see cref="LexiconData"/>
-    /// asset for baking into the ECS world. Attach this component to a GameObject in a subscene and
-    /// assign the desired <see cref="LexiconData"/> asset to convert its string entries into a
+    /// An authoring <see cref="MonoBehaviour"/> that holds a reference to a <see cref="LexiconCompiledData"/>
+    /// asset (the import output of a <c>.helex</c>) for baking into the ECS world. Attach this component to a
+    /// GameObject in a subscene and assign the desired asset to convert its string entries into a
     /// <see cref="LexiconStringBlobComponent"/> at bake time.
     /// </summary>
     public class LexiconDataAuthoring : MonoBehaviour
     {
-        /// <summary>The <see cref="LexiconData"/> asset whose string entries will be baked into a blob asset.</summary>
-        public LexiconData Data;
+        /// <summary>The compiled asset whose string entries will be baked into a blob asset.</summary>
+        public LexiconCompiledData Data;
     }
 
     /// <summary>
@@ -38,11 +38,10 @@ namespace Heathen.Lexicon
             var entity = GetEntity(TransformUsageFlags.None);
 
             var pairs = new List<(ulong hash, string value)>();
-            foreach (var entry in authoring.Data.entries)
+            foreach (var entry in authoring.Data.Entries)
             {
-                if (entry.hint != LexiconHintType.String) continue;
-                if (string.IsNullOrWhiteSpace(entry.key)) continue;
-                pairs.Add((LexiconRegistry.Hash(entry.key), entry.stringValue ?? ""));
+                if (entry.Hint != LexiconHintType.String) continue;
+                pairs.Add((entry.Hash, entry.StringValue ?? ""));
             }
 
             pairs.Sort((a, b) => a.hash.CompareTo(b.hash));

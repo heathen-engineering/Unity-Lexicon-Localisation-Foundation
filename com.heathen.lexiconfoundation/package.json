@@ -16,6 +16,7 @@
         "heathen"
     ],
     "dependencies": {
+        "com.unity.addressables": "2.9.1",
         "com.unity.collections": "2.6.2",
         "com.unity.mathematics": "1.2.5",
         "com.unity.nuget.newtonsoft-json": "3.2.1"

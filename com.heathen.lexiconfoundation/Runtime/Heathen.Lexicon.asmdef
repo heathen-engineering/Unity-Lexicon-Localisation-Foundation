@@ -2,7 +2,10 @@
     "name": "Heathen.Lexicon",
     "rootNamespace": "",
     "references": [
+        "Heathen.GameFramework",
         "Heathen.GameplayTags",
+        "Unity.Addressables",
+        "Unity.ResourceManager",
         "Unity.Collections",
         "Unity.Mathematics"
     ],

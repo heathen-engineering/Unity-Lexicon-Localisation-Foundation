@@ -28,7 +28,7 @@ namespace Heathen.Lexicon.Editor
 
         [SettingsProvider]
         public static SettingsProvider Create() =>
-            new LexiconSettingsProvider("Project/Localisation Lexicon", SettingsScope.Project)
+            new LexiconSettingsProvider("Project/Subsystems/Localisation Lexicon", SettingsScope.Project)
             {
                 keywords = new HashSet<string>(new[] { "lexicon", "localisation", "culture", "heathen", "translation" })
             };
