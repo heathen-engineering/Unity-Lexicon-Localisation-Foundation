@@ -3,6 +3,8 @@
     "rootNamespace": "",
     "references": [
         "Heathen.Lexicon",
+        "Heathen.GameFramework",
+        "Heathen.GameFramework.Editor",
         "Unity.Addressables",
         "Unity.Addressables.Editor",
         "Unity.ResourceManager"
