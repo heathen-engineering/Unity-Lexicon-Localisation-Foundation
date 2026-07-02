@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
@@ -9,7 +8,9 @@ using Object = UnityEngine.Object;
 
 namespace Heathen.Lexicon.Editor
 {
-    // Compiles .helex JSON source files into LexiconCompiledData sub-assets.
+    // Imports .helex JSON source files as TextAssets — the .helex file is BOTH the human-authored source AND
+    // the shipped runtime data (loaded via Addressables and parsed by LexiconSource at runtime). No compiled
+    // ScriptableObject is produced any more.
     //
     // Source format (.helex) — cross-engine compatible with O3DE Lexicon Foundation:
     // {
@@ -18,15 +19,15 @@ namespace Heathen.Lexicon.Editor
     //   "cultures":   ["en-GB"],
     //   "entries": {
     //     "UI.Play": "Play",
-    //     "UI.Logo": { "uuid": "...", "path": "Assets/Sprites/Logo.png" }
+    //     "UI.Logo": { "guid": "abc123...", "hint": "Sprite", "sub": "Logo", "path": "Assets/Sprites/Logo.png" }
     //   }
     // }
     //
-    // "uuid" is O3DE-specific — ignored in Unity.
-    // "path" is the Unity project-relative asset path for asset-type entries.
-    // "registered" defaults to true when omitted.
-    // All keys are hashed with XXH3 (seed 0) — identical to O3DE at runtime.
-    [ScriptedImporter(1, "helex")]
+    // For asset entries "guid" is authoritative at runtime (it is the Addressables address); "path" is kept for
+    // human readability and as an editor fallback. On import, a missing/stale "guid" is resolved from "path" and
+    // written back into the source file (idempotent — a file whose GUIDs are already correct is not rewritten),
+    // so the shipped file always carries the GUIDs the runtime needs. "uuid" is O3DE-specific and ignored.
+    [ScriptedImporter(2, "helex")]
     public class LexiconImporter : ScriptedImporter
     {
         public override void OnImportAsset(AssetImportContext ctx)
@@ -35,100 +36,108 @@ namespace Heathen.Lexicon.Editor
             try { json = File.ReadAllText(ctx.assetPath); }
             catch (Exception e) { ctx.LogImportError($"Failed to read .helex: {e.Message}"); return; }
 
-            var compiled = ScriptableObject.CreateInstance<LexiconCompiledData>();
+            string normalised = json;
+            bool   guidsChanged = false;
+            string assetId = Path.GetFileNameWithoutExtension(ctx.assetPath);
+            string[] cultures = Array.Empty<string>();
 
             try
             {
                 var root = JObject.Parse(json);
-                compiled.AssetId      = root["assetId"]?.Value<string>() ?? "";
-                compiled.AutoRegister = root["registered"]?.Value<bool>() ?? true;
-                compiled.Cultures     = root["cultures"]?.ToObject<string[]>() ?? Array.Empty<string>();
-                compiled.Entries      = root["entries"] is JObject entries
-                    ? ParseEntries(entries, ctx)
-                    : Array.Empty<CompiledLexiconEntry>();
+                assetId  = string.IsNullOrWhiteSpace(root["assetId"]?.Value<string>())
+                    ? Path.GetFileNameWithoutExtension(ctx.assetPath)
+                    : root["assetId"].Value<string>();
+                cultures = root["cultures"]?.ToObject<string[]>() ?? Array.Empty<string>();
+
+                guidsChanged = NormaliseAssetEntries(root, ctx);
+                normalised   = root.ToString(Newtonsoft.Json.Formatting.Indented);
             }
             catch (Exception e)
             {
+                // Ship the file as-is so a syntax error does not strip the asset entirely; report the error.
                 ctx.LogImportError($"Failed to parse .helex JSON: {e.Message}");
-                compiled.Entries  = Array.Empty<CompiledLexiconEntry>();
-                compiled.Cultures = Array.Empty<string>();
             }
 
-            if (string.IsNullOrWhiteSpace(compiled.AssetId))
-                compiled.AssetId = Path.GetFileNameWithoutExtension(ctx.assetPath);
+            // The .helex ships as a TextAsset holding the normalised JSON (GUIDs guaranteed present).
+            var textAsset = new TextAsset(normalised) { name = Path.GetFileNameWithoutExtension(ctx.assetPath) };
+            ctx.AddObjectToAsset("main", textAsset);
+            ctx.SetMainObject(textAsset);
 
-            // The Default asset is the culture-neutral fallback and may declare no cultures; every other
-            // .helex must list at least one, otherwise its entries would be unreachable at runtime.
-            var fileName  = Path.GetFileNameWithoutExtension(ctx.assetPath);
-            bool isDefault = string.Equals(fileName, "Default", StringComparison.OrdinalIgnoreCase)
-                          || string.Equals(compiled.AssetId, "default", StringComparison.OrdinalIgnoreCase);
-            if (!isDefault && (compiled.Cultures == null || compiled.Cultures.Length == 0))
+            // The Default source is the culture-neutral fallback and may declare no cultures; every other .helex
+            // must list at least one, otherwise its entries would be unreachable at runtime.
+            bool isDefault = string.Equals(assetId, "default", StringComparison.OrdinalIgnoreCase)
+                          || string.Equals(Path.GetFileNameWithoutExtension(ctx.assetPath), "Default", StringComparison.OrdinalIgnoreCase);
+            if (!isDefault && cultures.Length == 0)
                 ctx.LogImportError(
-                    $"[Lexicon] '{fileName}.helex' declares no cultures. Every .helex except Default must " +
-                    "list at least one culture code, otherwise its entries can never be resolved.");
+                    $"[Lexicon] '{Path.GetFileNameWithoutExtension(ctx.assetPath)}.helex' declares no cultures. " +
+                    "Every .helex except Default must list at least one culture code, otherwise its entries can " +
+                    "never be resolved.");
 
-            ctx.AddObjectToAsset("main", compiled);
-            ctx.SetMainObject(compiled);
+            // Write the normalised JSON (with resolved GUIDs) back to the source file so it stays in sync. Only
+            // when a GUID was actually added/corrected, to avoid reformatting churn and an import loop: the next
+            // import finds the GUIDs already present, so guidsChanged is false and nothing is written.
+            if (guidsChanged)
+            {
+                var path = ctx.assetPath;
+                EditorApplication.delayCall += () =>
+                {
+                    try
+                    {
+                        if (File.ReadAllText(path) == normalised) return;
+                        File.WriteAllText(path, normalised);
+                        AssetDatabase.ImportAsset(path, ImportAssetOptions.ForceUpdate);
+                    }
+                    catch (Exception e) { Debug.LogWarning($"[Lexicon] Could not write GUIDs back to '{path}': {e.Message}"); }
+                };
+            }
 
-            if (compiled.AutoRegister)
-                LexiconRegistry.Register(compiled);
+            // Keep the edit-mode registry current so a freshly edited .helex resolves without a domain reload.
+            LexiconSourceRefresh.RequestRefresh();
         }
 
-        private static CompiledLexiconEntry[] ParseEntries(JObject entries, AssetImportContext ctx)
+        // Resolves a GUID (and hint) for every asset entry from its path, mutating the JObject in place.
+        // Returns true when any GUID was newly set or corrected.
+        private static bool NormaliseAssetEntries(JObject root, AssetImportContext ctx)
         {
-            var result = new List<CompiledLexiconEntry>();
-            var seen   = new HashSet<ulong>();
+            if (root["entries"] is not JObject entries) return false;
+
+            bool changed = false;
             foreach (var prop in entries.Properties())
             {
-                var key = prop.Name.Trim();
-                if (string.IsNullOrWhiteSpace(key)) continue;
+                if (prop.Value is not JObject o) continue; // string entries need no work
 
-                // The compiled set must not contain duplicate keys — they would collide in the registry.
-                if (!seen.Add(LexiconRegistry.Hash(key)))
+                var path = o["path"]?.Value<string>();
+                var guid = o["guid"]?.Value<string>();
+
+                if (!string.IsNullOrEmpty(path))
                 {
-                    ctx.LogImportError($"Duplicate key '{key}' — keys must be unique within a .helex file.");
-                    continue;
+                    ctx.DependsOnSourceAsset(path); // reimport if the referenced asset moves
+
+                    var resolved = AssetDatabase.AssetPathToGUID(path);
+                    if (!string.IsNullOrEmpty(resolved) && resolved != guid)
+                    {
+                        o["guid"] = resolved;
+                        guid      = resolved;
+                        changed   = true;
+                    }
+                    else if (string.IsNullOrEmpty(resolved))
+                    {
+                        ctx.LogImportWarning($"Asset not found at '{path}' for key '{prop.Name}' — it will not resolve at runtime.");
+                    }
+                }
+                else if (string.IsNullOrEmpty(guid))
+                {
+                    ctx.LogImportWarning($"Asset entry '{prop.Name}' has neither 'path' nor 'guid' — it will not resolve at runtime.");
                 }
 
-                if (prop.Value.Type == JTokenType.String)
+                // Record the asset type so the runtime need not load the asset to classify it.
+                if (string.IsNullOrEmpty(o["hint"]?.Value<string>()) && !string.IsNullOrEmpty(path))
                 {
-                    result.Add(new CompiledLexiconEntry
-                    {
-                        Hash        = LexiconRegistry.Hash(key),
-                        Key         = key,
-                        Hint        = LexiconHintType.String,
-                        StringValue = prop.Value.Value<string>() ?? "",
-                    });
-                }
-                else if (prop.Value is JObject assetObj)
-                {
-                    var path = assetObj["path"]?.Value<string>();
-                    if (path == null)
-                    {
-                        ctx.LogImportWarning($"Asset entry '{key}' has no 'path' field — skipped.");
-                        continue;
-                    }
-                    var asset = AssetDatabase.LoadAssetAtPath<Object>(path);
-                    if (asset == null)
-                    {
-                        ctx.LogImportWarning($"Asset not found at '{path}' for key '{key}' — skipped.");
-                        continue;
-                    }
-                    ctx.DependsOnSourceAsset(path);
-                    result.Add(new CompiledLexiconEntry
-                    {
-                        Hash       = LexiconRegistry.Hash(key),
-                        Key        = key,
-                        Hint       = HintFromAsset(asset),
-                        AssetValue = asset,
-                    });
-                }
-                else
-                {
-                    ctx.LogImportWarning($"Entry '{key}' has unrecognised value type — skipped.");
+                    var hint = HintFromAsset(AssetDatabase.LoadAssetAtPath<Object>(path));
+                    if (hint != LexiconHintType.None) { o["hint"] = hint.ToString(); changed = true; }
                 }
             }
-            return result.ToArray();
+            return changed;
         }
 
         private static LexiconHintType HintFromAsset(Object asset) => asset switch
@@ -137,80 +146,27 @@ namespace Heathen.Lexicon.Editor
             Texture2D  _ => LexiconHintType.Texture,
             Sprite     _ => LexiconHintType.Sprite,
             GameObject _ => LexiconHintType.Prefab,
+            null         => LexiconHintType.None,
             _            => LexiconHintType.Asset,
         };
     }
 
+    // Keeps the edit-mode registry in sync with the project's .helex sources: refreshes on domain reload and,
+    // debounced, whenever a .helex is (re)imported. Replaces the former LexiconCompiledData discovery.
     [InitializeOnLoad]
-    internal static class LexiconCompiledDataRefresh
+    internal static class LexiconSourceRefresh
     {
-        static LexiconCompiledDataRefresh() => EditorApplication.delayCall += Refresh;
+        private static bool _queued;
 
-        internal static void Refresh()
+        static LexiconSourceRefresh() => EditorApplication.delayCall += Refresh;
+
+        internal static void RequestRefresh()
         {
-            var guids  = AssetDatabase.FindAssets("t:LexiconCompiledData");
-            var assets = new List<LexiconCompiledData>(guids.Length);
-            foreach (var guid in guids)
-            {
-                var asset = AssetDatabase.LoadAssetAtPath<LexiconCompiledData>(
-                    AssetDatabase.GUIDToAssetPath(guid));
-                if (asset != null && asset.AutoRegister) assets.Add(asset);
-            }
-            foreach (var a in assets) if ( LexiconRegistry.IsDefaultCompiledAsset(a)) LexiconRegistry.Register(a);
-            foreach (var a in assets) if (!LexiconRegistry.IsDefaultCompiledAsset(a)) LexiconRegistry.Register(a);
+            if (_queued) return;
+            _queued = true;
+            EditorApplication.delayCall += () => { _queued = false; Refresh(); };
         }
-    }
 
-    [CustomEditor(typeof(LexiconCompiledData))]
-    internal class LexiconCompiledDataEditor : UnityEditor.Editor
-    {
-        public override void OnInspectorGUI()
-        {
-            var data = (LexiconCompiledData)target;
-
-            EditorGUILayout.LabelField("Source", EditorStyles.boldLabel);
-            EditorGUILayout.LabelField("Compiled from",
-                AssetDatabase.GetAssetPath(data), EditorStyles.miniLabel);
-
-            EditorGUILayout.Space();
-            EditorGUILayout.LabelField("Settings", EditorStyles.boldLabel);
-            EditorGUI.BeginDisabledGroup(true);
-            EditorGUILayout.TextField("Asset ID", data.AssetId ?? "");
-            EditorGUILayout.Toggle("Auto Register", data.AutoRegister);
-            EditorGUI.EndDisabledGroup();
-
-            EditorGUILayout.Space();
-            EditorGUILayout.LabelField("Cultures", EditorStyles.boldLabel);
-            if (data.Cultures == null || data.Cultures.Length == 0)
-            {
-                EditorGUILayout.HelpBox("No cultures defined.", MessageType.Warning);
-            }
-            else
-            {
-                EditorGUI.BeginDisabledGroup(true);
-                foreach (var c in data.Cultures) EditorGUILayout.LabelField(c, EditorStyles.miniLabel);
-                EditorGUI.EndDisabledGroup();
-            }
-
-            EditorGUILayout.Space();
-            EditorGUILayout.LabelField("Compiled Entries", EditorStyles.boldLabel);
-            if (data.Entries == null || data.Entries.Length == 0)
-            {
-                EditorGUILayout.HelpBox(
-                    "No entries — set \"registered\": true and add entries to the .helex source.",
-                    MessageType.Info);
-                return;
-            }
-            EditorGUILayout.LabelField($"{data.Entries.Length} entries", EditorStyles.miniLabel);
-            EditorGUI.BeginDisabledGroup(true);
-            foreach (var entry in data.Entries)
-            {
-                EditorGUILayout.BeginHorizontal();
-                EditorGUILayout.LabelField(entry.Key, GUILayout.ExpandWidth(true));
-                EditorGUILayout.LabelField(entry.Hint.ToString(), GUILayout.Width(60));
-                EditorGUILayout.EndHorizontal();
-            }
-            EditorGUI.EndDisabledGroup();
-        }
+        internal static void Refresh() => LexiconRegistry.RefreshEditorSources();
     }
 }

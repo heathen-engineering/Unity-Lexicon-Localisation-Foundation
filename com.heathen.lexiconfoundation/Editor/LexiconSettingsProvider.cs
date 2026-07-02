@@ -566,11 +566,8 @@ namespace Heathen.Lexicon.Editor
         private void RefreshDocList()
         {
             _allDocs.Clear();
-            var guids = AssetDatabase.FindAssets("t:LexiconCompiledData");
-            foreach (var guid in guids)
+            foreach (var path in FindHelexPaths())
             {
-                var path = AssetDatabase.GUIDToAssetPath(guid);
-                if (!path.EndsWith(".helex", StringComparison.OrdinalIgnoreCase)) continue;
                 try { _allDocs.Add(ReadHelexDoc(path)); } catch { }
             }
 
@@ -816,11 +813,8 @@ namespace Heathen.Lexicon.Editor
         public static IEnumerable<string> GetAllLexiconKeys()
         {
             var keys  = new HashSet<string>();
-            var guids = AssetDatabase.FindAssets("t:LexiconCompiledData");
-            foreach (var guid in guids)
+            foreach (var path in FindHelexPaths())
             {
-                var path = AssetDatabase.GUIDToAssetPath(guid);
-                if (!path.EndsWith(".helex", StringComparison.OrdinalIgnoreCase)) continue;
                 try { foreach (var e in ReadHelexDoc(path).Entries) if (!string.IsNullOrWhiteSpace(e.Key)) keys.Add(e.Key); }
                 catch { }
             }
@@ -830,11 +824,8 @@ namespace Heathen.Lexicon.Editor
         public static IEnumerable<string> GetAllLexiconKeys(LexiconHintType hint)
         {
             var keys  = new HashSet<string>();
-            var guids = AssetDatabase.FindAssets("t:LexiconCompiledData");
-            foreach (var guid in guids)
+            foreach (var path in FindHelexPaths())
             {
-                var path = AssetDatabase.GUIDToAssetPath(guid);
-                if (!path.EndsWith(".helex", StringComparison.OrdinalIgnoreCase)) continue;
                 try
                 {
                     foreach (var e in ReadHelexDoc(path).Entries)
@@ -849,11 +840,8 @@ namespace Heathen.Lexicon.Editor
         public static void UpsertStringEntry(string key, string stringValue)
         {
             if (string.IsNullOrWhiteSpace(key)) return;
-            var guids = AssetDatabase.FindAssets("t:LexiconCompiledData");
-            foreach (var guid in guids)
+            foreach (var path in FindHelexPaths())
             {
-                var path = AssetDatabase.GUIDToAssetPath(guid);
-                if (!path.EndsWith(".helex", StringComparison.OrdinalIgnoreCase)) continue;
                 try
                 {
                     var doc    = ReadHelexDoc(path);
@@ -872,11 +860,8 @@ namespace Heathen.Lexicon.Editor
 
         public static string GetOrCreateDefault()
         {
-            var guids = AssetDatabase.FindAssets("t:LexiconCompiledData");
-            foreach (var guid in guids)
+            foreach (var p in FindHelexPaths())
             {
-                var p = AssetDatabase.GUIDToAssetPath(guid);
-                if (!p.EndsWith(".helex", StringComparison.OrdinalIgnoreCase)) continue;
                 if (string.Equals(Path.GetFileNameWithoutExtension(p), "Default", StringComparison.OrdinalIgnoreCase))
                     return p;
                 try
@@ -896,6 +881,18 @@ namespace Heathen.Lexicon.Editor
         }
 
         // ── .helex I/O ────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Enumerates every <c>.helex</c> asset path in the project, skipping hidden package <c>Samples~</c>
+        /// folders. Replaces <c>FindAssets("t:LexiconCompiledData")</c> now that <c>.helex</c> imports to a
+        /// TextAsset rather than a compiled ScriptableObject.
+        /// </summary>
+        internal static IEnumerable<string> FindHelexPaths()
+        {
+            foreach (var path in AssetDatabase.GetAllAssetPaths())
+                if (path.EndsWith(".helex", StringComparison.OrdinalIgnoreCase) && !path.Contains("~/"))
+                    yield return path;
+        }
 
         internal static HelexDocument ReadHelexDoc(string assetPath)
         {
@@ -955,6 +952,8 @@ namespace Heathen.Lexicon.Editor
                     entries[e.Key] = new JObject
                     {
                         ["hint"] = e.Hint.ToString(),
+                        // GUID is authoritative at runtime (the Addressables address); path is kept for readability.
+                        ["guid"] = string.IsNullOrEmpty(e.AssetPath) ? "" : AssetDatabase.AssetPathToGUID(e.AssetPath),
                         ["path"] = e.AssetPath ?? ""
                     };
             }

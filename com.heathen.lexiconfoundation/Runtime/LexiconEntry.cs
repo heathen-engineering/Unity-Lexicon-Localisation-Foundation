@@ -24,8 +24,25 @@ namespace Heathen.Lexicon
         /// <summary>
         /// The localised asset reference, used when <see cref="hint"/> is any non-string value. A directly
         /// resolved/injected <see cref="UnityEngine.Object"/> (e.g. via <see cref="LexiconRegistry.SetAsset"/>
-        /// or the editor); baked content carries the GUID instead and resolves through the Addressables seam.
+        /// or the editor); baked/streamed content carries <see cref="assetGuid"/> instead and resolves through
+        /// the Addressables seam (<see cref="LexiconAssetLoader"/>) on demand.
         /// </summary>
         public Object assetValue;
+
+        /// <summary>
+        /// The GUID of the localised asset, for streamed content where a live <see cref="assetValue"/> cannot be
+        /// serialised (baked code or JSON sources). When set and <see cref="assetValue"/> is <c>null</c>, the
+        /// entry resolves through the Addressables seam; acquire it with
+        /// <see cref="LexiconRegistry.AcquireAsset(string,string)"/> to stream it resident. Empty for entries
+        /// that carry a direct reference.
+        /// </summary>
+        public string assetGuid;
+
+        /// <summary>
+        /// The sub-asset name within <see cref="assetGuid"/> (e.g. a named sprite in a sprite sheet), or
+        /// <c>null</c>/empty for the main asset. Paired with <see cref="assetGuid"/> when resolving through the
+        /// Addressables seam.
+        /// </summary>
+        public string assetSubName;
     }
 }

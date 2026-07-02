@@ -16,8 +16,18 @@ namespace Heathen.Lexicon
     [Subsystem(SubsystemScope.Global)]
     public sealed class LexiconSubsystem : Subsystem, ISubsystemDebug
     {
-        /// <summary>Resets the registry to a clean session and re-discovers the registered Lexicon sources.</summary>
-        protected override void Initialize() => LexiconRegistry.ResetForSession();
+        /// <summary>
+        /// Resets the registry to a clean session and (re-)discovers the registered Lexicon sources. In the
+        /// editor discovery is synchronous (AssetDatabase, done inside <see cref="LexiconRegistry.ResetForSession"/>);
+        /// in a player the shipped <c>.helex</c> TextAssets stream in asynchronously via Addressables.
+        /// </summary>
+        protected override void Initialize()
+        {
+            LexiconRegistry.ResetForSession();
+#if !UNITY_EDITOR
+            LexiconRegistry.LoadShippedSourcesAsync();
+#endif
+        }
 
         /// <inheritdoc/>
         public IEnumerable<(string label, string value)> GetDebugInfo()

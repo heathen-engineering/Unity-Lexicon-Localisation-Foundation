@@ -1,4 +1,3 @@
-using System.Linq;
 using UnityEditor;
 
 namespace Heathen.Lexicon.Editor
@@ -11,28 +10,15 @@ namespace Heathen.Lexicon.Editor
             EditorApplication.delayCall += ForceRefresh;
         }
 
+        /// <summary>
+        /// Ensures a Default <c>.helex</c> exists and re-discovers all <c>.helex</c> sources into the registry
+        /// for edit-mode resolution. The Default now ships via its Addressables label (marked at build time by
+        /// <see cref="LexiconAddressables.MarkAllForBuild"/>), so no PlayerSettings preload is required.
+        /// </summary>
         public static void ForceRefresh()
         {
             LexiconSettingsProvider.GetOrCreateDefault();
-            LexiconCompiledDataRefresh.Refresh();
-            EnsureDefaultPreloaded();
-        }
-
-        /// <summary>
-        /// Guarantees the Default compiled asset is listed in PlayerSettings → Preloaded Assets, so it ships
-        /// in every player build and registers itself at startup regardless of where the <c>.helex</c> lives.
-        /// Also strips null holes Unity leaves in the list when assets are deleted.
-        /// </summary>
-        public static void EnsureDefaultPreloaded()
-        {
-            var path     = LexiconSettingsProvider.GetOrCreateDefault();
-            var compiled = AssetDatabase.LoadAssetAtPath<LexiconCompiledData>(path);
-            if (compiled == null) return;
-
-            var preloaded = PlayerSettings.GetPreloadedAssets().ToList();
-            bool changed  = preloaded.RemoveAll(a => a == null) > 0;
-            if (!preloaded.Contains(compiled)) { preloaded.Add(compiled); changed = true; }
-            if (changed) PlayerSettings.SetPreloadedAssets(preloaded.ToArray());
+            LexiconSourceRefresh.Refresh();
         }
     }
 }

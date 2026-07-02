@@ -8,23 +8,30 @@ namespace Heathen.Lexicon
 {
     /// <summary>
     /// The central runtime registry for all Lexicon localisation data.
-    /// Maintains a per-culture dictionary of entries sourced from <see cref="LexiconCompiledData"/> and
-    /// <see cref="LexiconCompiledData"/> assets, and resolves strings and assets for the active culture.
+    /// Maintains a per-culture dictionary of entries sourced from parsed <see cref="LexiconSource"/> (<c>.helex</c>)
+    /// data, and resolves strings and assets for the active culture.
     /// </summary>
     public static class LexiconRegistry
     {
-        private static readonly List<LexiconCompiledData> _registeredCompiledData = new();
+        /// <summary>
+        /// The Addressables label applied to every shipped <c>.helex</c> TextAsset, so the runtime can load all
+        /// localisation sources with a single labelled load. See <see cref="LoadShippedSourcesAsync"/>.
+        /// </summary>
+        public const string AddressablesLabel = "lexicon";
+
+        // Parsed .helex sources (the TextAsset delivery path). Tracked so RebuildAllCultures can re-index them.
+        private static readonly List<LexiconSource> _registeredSources = new();
         // culture code -> (hash -> entry)
         private static readonly Dictionary<string, Dictionary<ulong, LexiconEntry>> _cultures = new();
         // Runtime-injected entries (SetString/SetAsset) that are NOT backed by an asset. Re-applied on top
-        // of asset entries after every rebuild so they survive Register/Unregister churn and keep priority.
+        // of asset entries after every rebuild so they survive source churn and keep priority.
         private static readonly Dictionary<string, Dictionary<ulong, LexiconEntry>> _runtimeOverrides = new();
-        // Flattened hash -> entry index of the Default asset for O(1) last-resort lookup.
+        // Flattened hash -> entry index of the Default source for O(1) last-resort lookup.
         private static readonly Dictionary<ulong, LexiconEntry> _defaultIndex = new();
         private static string           _activeCulture;
         private static string           _defaultCulture;
-        // The asset literally named "Default" — unconditional last-resort fallback
-        private static LexiconCompiledData _defaultCompiledData;
+        // The parsed .helex source with assetId "default" — the culture-neutral last-resort fallback.
+        private static LexiconSource _defaultSource;
 
         /// <summary>
         /// Raised whenever the active culture changes via <see cref="UseCulture"/>.
@@ -48,25 +55,24 @@ namespace Heathen.Lexicon
         {
             // Reset all state for a clean session, including under "Enter Play Mode without Domain Reload"
             // where statics (and event subscriptions) would otherwise persist from the previous session.
-            _registeredCompiledData.Clear();
+            _registeredSources.Clear();
             _cultures.Clear();
             _runtimeOverrides.Clear();
             _defaultIndex.Clear();
             _activeCulture        = null;
             _defaultCulture       = null;
-            _defaultCompiledData  = null;
+            _defaultSource        = null;
             CultureChanged        = null;
             DefaultCultureChanged = null;
 
-            // Register every loaded asset, not just those under a Resources folder. FindObjectsOfTypeAll
-            // also returns PlayerSettings-preloaded assets (how the Default ships) and already-loaded scene
-            // assets; anything that loads later self-registers via its own OnEnable. Default-named assets
-            // register first so they become the fallback regardless of where they live in the project.
-            var compiled = Resources.FindObjectsOfTypeAll<LexiconCompiledData>();
-            foreach (var asset in compiled)
-                if (asset != null && asset.AutoRegister &&  IsDefaultCompiledAsset(asset)) Register(asset);
-            foreach (var asset in compiled)
-                if (asset != null && asset.AutoRegister && !IsDefaultCompiledAsset(asset)) Register(asset);
+            // Discover localisation sources. In the editor, .helex TextAssets resolve synchronously via
+            // AssetDatabase so play-in-editor is populated immediately at subsystem boot. In a player, the
+            // shipped .helex TextAssets stream in asynchronously via Addressables — kicked from
+            // LexiconSubsystem.Initialize after this reset (see LoadShippedSourcesAsync), since a synchronous
+            // reset cannot await a load.
+#if UNITY_EDITOR
+            DiscoverEditorSources();
+#endif
 
             // Auto-detect system locale, falling back to the default culture. Sets _activeCulture directly
             // without firing the event since no listeners are registered this early in startup.
@@ -77,63 +83,100 @@ namespace Heathen.Lexicon
         }
 
         /// <summary>
-        /// Registers a <see cref="LexiconCompiledData"/> asset with the registry, indexing all its
-        /// pre-hashed entries under each of its declared cultures. Skips registration if already registered.
+        /// Registers a parsed <see cref="LexiconSource"/> (from a shipped <c>.helex</c> TextAsset) with the
+        /// registry, indexing all its entries under each declared culture. Strings are held resident; asset
+        /// entries carry a GUID and stream on demand via <see cref="AcquireAsset(string,string)"/>. This is the
+        /// sole delivery path for localisation content. Skips a source that is already registered or has
+        /// <see cref="LexiconSource.AutoRegister"/> false.
         /// </summary>
-        /// <param name="data">The <see cref="LexiconCompiledData"/> asset to register.</param>
-        public static void Register(LexiconCompiledData data)
+        /// <param name="source">The parsed <c>.helex</c> source to register.</param>
+        public static void RegisterParsed(LexiconSource source)
         {
-            if (data == null || _registeredCompiledData.Contains(data)) return;
-            _registeredCompiledData.Add(data);
-            AddCulturesFrom(data);
+            if (source == null || !source.AutoRegister || _registeredSources.Contains(source)) return;
+            _registeredSources.Add(source);
+            AddCulturesFrom(source);
 
-            if (IsDefaultCompiledAsset(data))
+            if (source.IsDefault)
             {
-                _defaultCompiledData = data;
+                _defaultSource = source;
                 RebuildDefaultIndex();
             }
 
-            // Seed the default/active culture from the first asset that declares one (mirrors the legacy
-            // path), so compiled-only projects still get a default-culture fallback tier.
-            if (data.Cultures != null && data.Cultures.Length > 0)
+            // Seed the default/active culture from the first source that declares one, so a project loaded
+            // entirely from .helex sources still gets a default-culture fallback tier.
+            if (source.Cultures != null && source.Cultures.Length > 0)
             {
-                _defaultCulture ??= data.Cultures[0];
-                _activeCulture  ??= data.Cultures[0];
+                _defaultCulture ??= source.Cultures[0];
+                _activeCulture  ??= source.Cultures[0];
             }
 
             ReapplyOverrides();
         }
 
         /// <summary>
-        /// Returns <see langword="true"/> when the given <see cref="LexiconCompiledData"/> asset
-        /// is the designated fallback, identified by its name or <see cref="LexiconCompiledData.AssetId"/>
-        /// equalling <c>"default"</c> (case-insensitive).
+        /// Notifies listeners that localisation sources have (re)loaded by re-raising <see cref="CultureChanged"/>
+        /// with the active culture, so bound fields re-resolve. Called after the asynchronous player load
+        /// completes (<see cref="LoadShippedSourcesAsync"/>); the brief window before completion resolves to the
+        /// fallback/literal value.
         /// </summary>
-        /// <param name="data">The compiled data asset to test.</param>
-        /// <returns><see langword="true"/> if the asset is the default fallback; otherwise <see langword="false"/>.</returns>
-        public static bool IsDefaultCompiledAsset(LexiconCompiledData data) =>
-            data != null &&
-            (string.Equals(data.name,    "Default", StringComparison.OrdinalIgnoreCase) ||
-             string.Equals(data.AssetId, "default", StringComparison.OrdinalIgnoreCase));
+        public static void NotifySourcesLoaded() => CultureChanged?.Invoke(_activeCulture);
+
+#if !UNITY_EDITOR
+        // Keeps the load handle alive for the lifetime of the app (sources are held resident once loaded).
+        private static UnityEngine.ResourceManagement.AsyncOperations.AsyncOperationHandle _sourcesHandle;
 
         /// <summary>
-        /// Removes a <see cref="LexiconCompiledData"/> asset from the registry and rebuilds all culture tables.
-        /// The Default asset cannot be unregistered — it is the system's permanent last-resort fallback.
-        /// Runtime-injected entries (via <see cref="SetString"/>/<see cref="SetAsset"/>) are preserved.
+        /// Streams every shipped <c>.helex</c> TextAsset (those carrying the <see cref="AddressablesLabel"/>)
+        /// via Addressables, parses and registers each, then raises <see cref="NotifySourcesLoaded"/>. Kicked
+        /// once at framework boot from <c>LexiconSubsystem.Initialize</c> in players; the editor uses the
+        /// synchronous <c>AssetDatabase</c> path instead.
         /// </summary>
-        /// <param name="data">The <see cref="LexiconCompiledData"/> asset to remove.</param>
-        public static void Unregister(LexiconCompiledData data)
+        public static void LoadShippedSourcesAsync()
         {
-            if (data == null || IsDefaultCompiledAsset(data)) return;
-            if (!_registeredCompiledData.Remove(data)) return;
+            var handle = UnityEngine.AddressableAssets.Addressables.LoadAssetsAsync<TextAsset>(
+                AddressablesLabel,
+                ta => { if (ta != null) RegisterParsed(LexiconSource.Parse(ta.text)); });
+            _sourcesHandle = handle;
+            handle.Completed += _ => NotifySourcesLoaded();
+        }
+#endif
+
+#if UNITY_EDITOR
+        // Editor-only synchronous discovery of .helex sources from the project (no built Addressables catalogue
+        // needed for play-in-editor). Registers Default sources first so they seed the fallback tier.
+        private static void DiscoverEditorSources()
+        {
+            var sources = new List<LexiconSource>();
+            foreach (var path in UnityEditor.AssetDatabase.GetAllAssetPaths())
+            {
+                if (!path.EndsWith(".helex", StringComparison.OrdinalIgnoreCase)) continue;
+                if (path.Contains("~/")) continue; // skip hidden package Samples~ folders
+                var ta = UnityEditor.AssetDatabase.LoadAssetAtPath<TextAsset>(path);
+                if (ta != null) sources.Add(LexiconSource.Parse(ta.text));
+            }
+            foreach (var s in sources) if ( s.IsDefault) RegisterParsed(s);
+            foreach (var s in sources) if (!s.IsDefault) RegisterParsed(s);
+        }
+
+        /// <summary>
+        /// Editor-only: re-discovers all <c>.helex</c> sources and rebuilds the culture tables, without
+        /// disturbing <see cref="CultureChanged"/> subscriptions (unlike <see cref="ResetForSession"/>). Called
+        /// on domain reload and whenever a <c>.helex</c> is (re)imported, so edit-mode resolution stays current.
+        /// </summary>
+        public static void RefreshEditorSources()
+        {
+            _registeredSources.Clear();
+            _defaultSource = null;
+            DiscoverEditorSources();
             RebuildAllCultures();
         }
+#endif
 
         /// <summary>
         /// Sets the active culture and raises <see cref="CultureChanged"/>. This is the primary
         /// game-developer API for switching language at runtime, such as from a settings menu.
         /// Resolution falls back through the base language, then the default culture, then the
-        /// Default asset when no exact match is found.
+        /// Default source when no exact match is found.
         /// </summary>
         /// <param name="cultureCode">The BCP 47 culture code to activate (e.g. <c>"fr-CA"</c>).</param>
         public static void UseCulture(string cultureCode)
@@ -158,8 +201,8 @@ namespace Heathen.Lexicon
         /// <summary>The fallback culture established during registration, or <c>null</c> when none is set.</summary>
         public static string GetDefaultCulture() => _defaultCulture;
 
-        /// <summary>The number of registered Lexicon sources (compiled + legacy data assets). For diagnostics.</summary>
-        public static int RegisteredSourceCount => _registeredCompiledData.Count;
+        /// <summary>The number of registered Lexicon sources (parsed .helex sources). For diagnostics.</summary>
+        public static int RegisteredSourceCount => _registeredSources.Count;
 
         /// <summary>
         /// Returns all culture codes that have at least one registered asset mapped to them.
@@ -169,15 +212,15 @@ namespace Heathen.Lexicon
         public static IEnumerable<string> GetMappedCultureCodes() => _cultures.Keys;
 
         /// <summary>
-        /// Returns the asset IDs of all currently registered <see cref="LexiconCompiledData"/> assets
-        /// that have a non-empty <see cref="LexiconCompiledData.AssetId"/>.
+        /// Returns the asset IDs of all currently registered <see cref="LexiconSource"/> sources
+        /// that have a non-empty <see cref="LexiconSource.AssetId"/>.
         /// </summary>
         /// <returns>An enumerable of asset ID strings.</returns>
         public static IEnumerable<string> GetAvailableAssetIds()
         {
-            foreach (var data in _registeredCompiledData)
-                if (!string.IsNullOrWhiteSpace(data.AssetId))
-                    yield return data.AssetId;
+            foreach (var source in _registeredSources)
+                if (!string.IsNullOrWhiteSpace(source.AssetId))
+                    yield return source.AssetId;
         }
 
         /// <summary>
@@ -218,8 +261,13 @@ namespace Heathen.Lexicon
         /// <returns>The resolved <see cref="UnityEngine.Object"/>, or <see langword="null"/> if not found.</returns>
         public static Object ResolveAsset(ulong key)
         {
-            if (TryGetEntry(key, out var entry))
-                return entry.assetValue;
+            if (!TryGetEntry(key, out var entry)) return null;
+            // A direct reference (injected via SetAsset or carried by a compiled asset) wins; otherwise a
+            // streamed entry resolves its GUID through the Addressables seam (cache in a player, AssetDatabase
+            // in the editor). Acquire the entry first via AcquireAsset for a guaranteed-resident player load.
+            if (entry.assetValue != null) return entry.assetValue;
+            if (!string.IsNullOrEmpty(entry.assetGuid))
+                return LexiconAssetLoader.Resolve(entry.assetGuid, entry.assetSubName);
             return null;
         }
 
@@ -309,8 +357,7 @@ namespace Heathen.Lexicon
         }
 
         /// <summary>
-        /// Injects or overwrites a string entry in the registry without requiring a
-        /// <see cref="LexiconCompiledData"/> asset. Uses the active culture when <paramref name="cultureCode"/>
+        /// Injects or overwrites a string entry in the registry. Uses the active culture when <paramref name="cultureCode"/>
         /// is <see langword="null"/>.
         /// </summary>
         /// <param name="dotPath">The dot-path key for the entry (e.g. <c>"UI.Play"</c>).</param>
@@ -329,8 +376,7 @@ namespace Heathen.Lexicon
         }
 
         /// <summary>
-        /// Injects or overwrites an asset entry in the registry without requiring a
-        /// <see cref="LexiconCompiledData"/> asset. The hint is inferred from the asset type.
+        /// Injects or overwrites an asset entry in the registry. The hint is inferred from the asset type.
         /// Uses the active culture when <paramref name="cultureCode"/> is <see langword="null"/>.
         /// </summary>
         /// <param name="dotPath">The dot-path key for the entry.</param>
@@ -354,6 +400,94 @@ namespace Heathen.Lexicon
             var entry   = new LexiconEntry { key = dotPath, hint = hint, assetValue = asset };
             EnsureCulture(culture)[key]         = entry;
             EnsureOverrideCulture(culture)[key] = entry; // survives RebuildAllCultures
+        }
+
+        /// <summary>
+        /// Injects or overwrites a <em>streamed</em> asset entry that carries a GUID rather than a live
+        /// reference. The asset is not loaded until
+        /// acquired via <see cref="AcquireAsset(string,string)"/>; <see cref="ResolveAsset(string)"/> then returns
+        /// it from the Addressables seam. This is the runtime surface for streamable, GUID-addressed content
+        /// (e.g. voice-over) and the same shape the compiled <c>.helex</c> sources register. Uses the active
+        /// culture when <paramref name="cultureCode"/> is <see langword="null"/>.
+        /// </summary>
+        /// <param name="dotPath">The dot-path key for the entry.</param>
+        /// <param name="guid">The GUID of the asset (its addressable address).</param>
+        /// <param name="hint">The content type of the asset (e.g. <see cref="LexiconHintType.Sound"/>).</param>
+        /// <param name="subAssetName">The sub-asset name for sprite sheets, or <c>null</c> for the main asset.</param>
+        /// <param name="cultureCode">
+        /// The BCP 47 culture code to write into, or <see langword="null"/> to target the active culture.
+        /// </param>
+        public static void SetAssetByGuid(string dotPath, string guid, LexiconHintType hint = LexiconHintType.Asset,
+                                          string subAssetName = null, string cultureCode = null)
+        {
+            if (string.IsNullOrWhiteSpace(dotPath) || string.IsNullOrEmpty(guid)) return;
+            var key     = Hash(dotPath);
+            var culture = ResolveWriteCulture(cultureCode);
+            var entry   = new LexiconEntry
+            {
+                key          = dotPath,
+                hint         = hint,
+                assetGuid    = guid,
+                assetSubName = subAssetName,
+            };
+            EnsureCulture(culture)[key]         = entry;
+            EnsureOverrideCulture(culture)[key] = entry; // survives RebuildAllCultures
+        }
+
+        /// <summary>
+        /// Acquires and streams resident the asset for the given dot-path key in the active culture, so a later
+        /// <see cref="ResolveAsset(string)"/> returns it without blocking in a player. Reference-counted; balance
+        /// every call with <see cref="ReleaseAsset(string,string)"/>. A no-op for keys whose entry carries a
+        /// direct reference (already resident) or is not an asset. This is the key-addressed voice-over streaming
+        /// surface: hold a window of dialogue lines resident and release them when they leave the window.
+        /// </summary>
+        /// <param name="dotPath">The dot-path key of the asset entry to stream in.</param>
+        /// <param name="subAssetName">
+        /// The sub-asset name to acquire, or <c>null</c> to use the sub-asset recorded on the entry.
+        /// </param>
+        /// <returns>A task that completes when the asset is resident (already complete when held or in the editor).</returns>
+        public static System.Threading.Tasks.Task AcquireAsset(string dotPath, string subAssetName = null)
+            => AcquireAsset(Hash(dotPath), subAssetName);
+
+        /// <summary>
+        /// Acquires and streams resident the asset for the given pre-computed hash in the active culture.
+        /// See <see cref="AcquireAsset(string,string)"/>.
+        /// </summary>
+        /// <param name="key">The XXH3 hash of the dot-path key.</param>
+        /// <param name="subAssetName">
+        /// The sub-asset name to acquire, or <c>null</c> to use the sub-asset recorded on the entry.
+        /// </param>
+        /// <returns>A task that completes when the asset is resident.</returns>
+        public static System.Threading.Tasks.Task AcquireAsset(ulong key, string subAssetName = null)
+        {
+            if (!TryGetEntry(key, out var entry) || string.IsNullOrEmpty(entry.assetGuid))
+                return System.Threading.Tasks.Task.CompletedTask;
+            return LexiconAssetLoader.AcquireAsync(entry.assetGuid, subAssetName ?? entry.assetSubName);
+        }
+
+        /// <summary>
+        /// Releases one reference acquired via <see cref="AcquireAsset(string,string)"/> for the given dot-path
+        /// key. The asset is unloaded when its last reference is released. A no-op for non-streamed entries.
+        /// </summary>
+        /// <param name="dotPath">The dot-path key of the asset entry to release.</param>
+        /// <param name="subAssetName">
+        /// The sub-asset name to release, or <c>null</c> to use the sub-asset recorded on the entry.
+        /// </param>
+        public static void ReleaseAsset(string dotPath, string subAssetName = null)
+            => ReleaseAsset(Hash(dotPath), subAssetName);
+
+        /// <summary>
+        /// Releases one reference acquired via <see cref="AcquireAsset(ulong,string)"/> for the given hash.
+        /// See <see cref="ReleaseAsset(string,string)"/>.
+        /// </summary>
+        /// <param name="key">The XXH3 hash of the dot-path key.</param>
+        /// <param name="subAssetName">
+        /// The sub-asset name to release, or <c>null</c> to use the sub-asset recorded on the entry.
+        /// </param>
+        public static void ReleaseAsset(ulong key, string subAssetName = null)
+        {
+            if (!TryGetEntry(key, out var entry) || string.IsNullOrEmpty(entry.assetGuid)) return;
+            LexiconAssetLoader.Release(entry.assetGuid, subAssetName ?? entry.assetSubName);
         }
 
         /// <summary>
@@ -433,9 +567,9 @@ namespace Heathen.Lexicon
         private static void RebuildAllCultures()
         {
             _cultures.Clear();
-            foreach (var data in _registeredCompiledData)
-                AddCulturesFrom(data);
-            ReapplyOverrides();   // runtime injections survive asset churn and keep priority
+            foreach (var source in _registeredSources)
+                AddCulturesFrom(source);
+            ReapplyOverrides();   // runtime injections survive source churn and keep priority
             RebuildDefaultIndex();
         }
 
@@ -450,14 +584,14 @@ namespace Heathen.Lexicon
             }
         }
 
-        // Rebuilds the flattened hash -> entry index used for the Default last-resort lookup.
+        // Rebuilds the flattened hash -> entry index used for the Default last-resort lookup, from the parsed
+        // Default source (the .helex whose assetId is "default").
         private static void RebuildDefaultIndex()
         {
             _defaultIndex.Clear();
-            if (_defaultCompiledData?.Entries != null)
-                foreach (var e in _defaultCompiledData.Entries)
-                    _defaultIndex[e.Hash] = new LexiconEntry
-                    { key = e.Key, hint = e.Hint, stringValue = e.StringValue, assetValue = e.AssetValue };
+            if (_defaultSource?.Entries != null)
+                foreach (var e in _defaultSource.Entries)
+                    _defaultIndex[Hash(e.key)] = e;
         }
 
         private static Dictionary<ulong, LexiconEntry> EnsureOverrideCulture(string culture)
@@ -470,10 +604,10 @@ namespace Heathen.Lexicon
             return dict;
         }
 
-        private static void AddCulturesFrom(LexiconCompiledData data)
+        private static void AddCulturesFrom(LexiconSource source)
         {
-            if (data?.Entries == null || data.Cultures == null) return;
-            foreach (var culture in data.Cultures)
+            if (source?.Entries == null || source.Cultures == null) return;
+            foreach (var culture in source.Cultures)
             {
                 if (string.IsNullOrWhiteSpace(culture)) continue;
                 if (!_cultures.TryGetValue(culture, out var dict))
@@ -481,16 +615,8 @@ namespace Heathen.Lexicon
                     dict = new Dictionary<ulong, LexiconEntry>();
                     _cultures[culture] = dict;
                 }
-                foreach (var entry in data.Entries)
-                {
-                    dict[entry.Hash] = new LexiconEntry
-                    {
-                        key         = entry.Key,
-                        hint        = entry.Hint,
-                        stringValue = entry.StringValue,
-                        assetValue  = entry.AssetValue,
-                    };
-                }
+                foreach (var entry in source.Entries)
+                    dict[Hash(entry.key)] = entry;
             }
         }
 
