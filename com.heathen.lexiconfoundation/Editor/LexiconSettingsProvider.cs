@@ -160,7 +160,7 @@ namespace Heathen.Lexicon.Editor
                         var r = GUILayoutUtility.GetLastRect();
                         EditorGUI.LabelField(new Rect(r.x + 3, r.y, r.width - 3, r.height),
                             "type to search (e.g. fr, French, Canada)…",
-                            new GUIStyle(EditorStyles.label) { normal = { textColor = new Color(0.5f, 0.5f, 0.5f) } });
+                            new GUIStyle(EditorStyles.label) { normal = new GUIStyleState { textColor = new Color(0.5f, 0.5f, 0.5f) } });
                     }
                     bool enterPressed = Event.current.type == EventType.KeyDown
                         && (Event.current.keyCode == KeyCode.Return || Event.current.keyCode == KeyCode.KeypadEnter)
