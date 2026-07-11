@@ -17,12 +17,19 @@
     "overrideReferences": false,
     "precompiledReferences": [],
     "autoReferenced": true,
-    "defineConstraints": [],
+    "defineConstraints": [
+        "HEATHEN_GAMEFRAMEWORK"
+    ],
     "versionDefines": [
         {
             "name": "com.heathen.lexiconfoundation",
             "expression": "",
             "define": "HEATHEN_LEXICON_FOUNDATION"
+        },
+        {
+            "name": "com.heathen.gameframework",
+            "expression": "",
+            "define": "HEATHEN_GAMEFRAMEWORK"
         }
     ],
     "noEngineReferences": false
