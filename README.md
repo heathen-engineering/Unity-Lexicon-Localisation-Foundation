@@ -10,7 +10,7 @@
 # Lexicon Localisation Foundation
 
 ![License](https://img.shields.io/badge/License-Apache_2.0-blue?style=flat-square)
-![Maintained](https://img.shields.io/badge/Maintained%3F-yes-green?style=flat-square)
+[![Maintained](https://img.shields.io/badge/Maintained-On%20Codeberg-brightgreen?style=flat-square)](https://codeberg.org/Heathen-Engineering/Unity-Lexicon-Localisation-Foundation)
 ![Unity](https://img.shields.io/badge/Unity-6%20%2B-%23313131?style=flat-square&logo=unity&logoColor=white)
 
 A lightweight, key-driven localisation system for Unity. Text and asset references are stored behind dot-path keys hashed to `ulong` via xxHash3 — zero runtime string cost after registration, with a Burst-safe snapshot API and a three-mode per-field fallback chain.
